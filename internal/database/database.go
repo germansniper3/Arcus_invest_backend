@@ -1,0 +1,32 @@
+package database
+
+import (
+	"arcusinvest/internal/models"
+
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+)
+
+func Connect(databaseURL string) (*gorm.DB, error) {
+	db, err := gorm.Open(postgres.Open(databaseURL), &gorm.Config{})
+	if err != nil {
+		return nil, err
+	}
+	return db, nil
+}
+
+func Migrate(db *gorm.DB) error {
+	return db.AutoMigrate(
+		&models.User{},
+		&models.StudentProfile{},
+		&models.Enrollment{},
+		&models.QuoteRequest{},
+		&models.ChatMessage{},
+		&models.OnboardingInvitation{},
+		&models.Event{},
+		&models.Reservation{},
+		&models.CapstoneMilestone{},
+		&models.CapstoneComment{},
+		&models.Product{},
+	)
+}
