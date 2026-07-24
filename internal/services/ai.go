@@ -10,22 +10,22 @@ import (
 	"time"
 )
 
-type geminiRequest struct {
-	Contents []geminiContent `json:"contents"`
+type anthropicMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
 }
 
-type geminiContent struct {
-	Parts []geminiPart `json:"parts"`
+type anthropicRequest struct {
+	Model     string             `json:"model"`
+	MaxTokens int                `json:"max_tokens"`
+	System    string             `json:"system"`
+	Messages  []anthropicMessage `json:"messages"`
 }
 
-type geminiPart struct {
-	Text string `json:"text"`
-}
-
-type geminiResponse struct {
-	Candidates []struct {
-		Content geminiContent `json:"content"`
-	} `json:"candidates"`
+type anthropicResponse struct {
+	Content []struct {
+		Text string `json:"text"`
+	} `json:"content"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
@@ -43,20 +43,22 @@ func Chat(cfg *config.Config, question string) (string, string, error) {
 
 	model := cfg.AIModel
 	if model == "" {
-		model = "gemini-2.5-flash"
+		model = "claude-sonnet-5"
 	}
 
 	baseURL := strings.TrimRight(cfg.AIProviderURL, "/")
 	if baseURL == "" {
-		baseURL = "https://generativelanguage.googleapis.com"
+		baseURL = "https://api.anthropic.com"
 	}
 
-	url := fmt.Sprintf("%s/v1beta/models/%s:generateContent?key=%s", baseURL, model, apiKey)
-	prompt := fmt.Sprintf("%s\n\nUser Question: %s\n\nArcus Assist:", system, question)
+	url := fmt.Sprintf("%s/v1/messages", baseURL)
 
-	reqPayload := geminiRequest{
-		Contents: []geminiContent{
-			{Parts: []geminiPart{{Text: prompt}}},
+	reqPayload := anthropicRequest{
+		Model:     model,
+		MaxTokens: 1024,
+		System:    system,
+		Messages: []anthropicMessage{
+			{Role: "user", Content: question},
 		},
 	}
 
@@ -71,6 +73,8 @@ func Chat(cfg *config.Config, question string) (string, string, error) {
 		return fallbackAnswer(question), "local-knowledge-base", nil
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", apiKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -78,7 +82,7 @@ func Chat(cfg *config.Config, question string) (string, string, error) {
 	}
 	defer resp.Body.Close()
 
-	var result geminiResponse
+	var result anthropicResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return fallbackAnswer(question), "local-knowledge-base", nil
 	}
@@ -87,9 +91,8 @@ func Chat(cfg *config.Config, question string) (string, string, error) {
 		return fallbackAnswer(question), "local-knowledge-base", nil
 	}
 
-	if len(result.Candidates) > 0 && len(result.Candidates[0].Content.Parts) > 0 {
-		aiText := result.Candidates[0].Content.Parts[0].Text
-		return strings.TrimSpace(aiText), "gemini:" + model, nil
+	if len(result.Content) > 0 && result.Content[0].Text != "" {
+		return strings.TrimSpace(result.Content[0].Text), "anthropic:" + model, nil
 	}
 
 	return fallbackAnswer(question), "local-knowledge-base", nil
