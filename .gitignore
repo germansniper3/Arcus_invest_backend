@@ -5,8 +5,6 @@ dist/
 !.env.example
 .DS_Store
 *.log
-tmp/
-backend/tmp/
-storage/
-backend/storage/
+/tmp/
+/storage/
 frontend/.vite/
