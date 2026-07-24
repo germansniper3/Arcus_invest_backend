@@ -135,6 +135,56 @@ type CapstoneComment struct {
 	Message          string    `json:"message" gorm:"type:text;not null"`
 }
 
+type ProgressReport struct {
+	BaseModel
+	StudentProfileID   uuid.UUID  `json:"student_profile_id" gorm:"type:uuid;index;not null"`
+	PeriodStart        time.Time  `json:"period_start"`
+	PeriodEnd          time.Time  `json:"period_end"`
+	Accomplishments    string     `json:"accomplishments" gorm:"type:text"`
+	Challenges         string     `json:"challenges" gorm:"type:text"`
+	SupervisorFeedback string     `json:"supervisor_feedback" gorm:"type:text"`
+	Status             string     `json:"status" gorm:"default:'submitted'"` // submitted, reviewed
+	ReviewedAt         *time.Time `json:"reviewed_at"`
+}
+
+type ExtensionRequest struct {
+	BaseModel
+	StudentProfileID  uuid.UUID  `json:"student_profile_id" gorm:"type:uuid;index;not null"`
+	ExtensionType     string     `json:"extension_type"`
+	RequestedDeadline time.Time  `json:"requested_deadline"`
+	Reason            string     `json:"reason" gorm:"type:text"`
+	DecisionNote      string     `json:"decision_note" gorm:"type:text"`
+	Status            string     `json:"status" gorm:"default:'pending'"` // pending, approved, denied
+	DecidedAt         *time.Time `json:"decided_at"`
+}
+
+// Submission is a deliverable file a student uploads for mentor review. The
+// actual bytes live in the storage layer; StoredKey is the opaque, server-
+// generated storage key and is never exposed in JSON (json:"-").
+type Submission struct {
+	BaseModel
+	StudentProfileID uuid.UUID  `json:"student_profile_id" gorm:"type:uuid;index;not null"`
+	Title            string     `json:"title" gorm:"not null"`
+	Kind             string     `json:"kind"` // proposal, report, final, other
+	FileName         string     `json:"file_name"`     // original client filename, display only
+	StoredKey        string     `json:"-" gorm:"not null"` // opaque storage key, never exposed
+	ContentType      string     `json:"content_type"`
+	Size             int64      `json:"size"` // bytes
+	Status           string     `json:"status" gorm:"default:'submitted'"` // submitted, accepted, revise
+	ReviewNote       string     `json:"review_note" gorm:"type:text"`
+	ReviewedAt       *time.Time `json:"reviewed_at"`
+}
+
+type Broadcast struct {
+	BaseModel
+	EventID        uuid.UUID  `json:"event_id" gorm:"type:uuid;index;not null"`
+	Subject        string     `json:"subject"`
+	Message        string     `json:"message" gorm:"type:text;not null"`
+	RecipientCount int        `json:"recipient_count"`
+	Status         string     `json:"status" gorm:"not null;default:'queued'"` // queued, sent
+	SentAt         *time.Time `json:"sent_at"`
+}
+
 type QuoteRequest struct {
 	BaseModel
 	Name       string `json:"name" gorm:"not null"`

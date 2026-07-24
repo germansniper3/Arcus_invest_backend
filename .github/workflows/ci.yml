@@ -1,0 +1,51 @@
+name: Backend CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: arcusinvest
+          POSTGRES_USER: arcus
+          POSTGRES_PASSWORD: arcus
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U arcus -d arcusinvest"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgres://arcus:arcus@localhost:5432/arcusinvest?sslmode=disable
+      JWT_SECRET: ci-test-secret-not-for-production
+      FRONTEND_URL: http://localhost:5173
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test (unit + DB integration)
+        run: go test ./... -count=1

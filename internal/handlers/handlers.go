@@ -4,8 +4,11 @@ import (
 	"arcusinvest/internal/config"
 	"arcusinvest/internal/models"
 	"arcusinvest/internal/services"
+	"arcusinvest/internal/storage"
 	"fmt"
+	"mime"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -16,8 +19,9 @@ import (
 )
 
 type Handler struct {
-	DB  *gorm.DB
-	Cfg *config.Config
+	DB    *gorm.DB
+	Cfg   *config.Config
+	Store storage.Storage
 }
 
 func (h Handler) Health(c echo.Context) error {
@@ -25,7 +29,10 @@ func (h Handler) Health(c echo.Context) error {
 }
 
 func (h Handler) Login(c echo.Context) error {
-	var req struct{ Email, Password string }
+	var req struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, errResponse("invalid request body"))
 	}
@@ -53,7 +60,12 @@ func (h Handler) CreateEnrollment(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, errResponse("full name and email are required"))
 	}
 	req.Email = strings.ToLower(req.Email)
+	// This is a public endpoint: never let the caller set admin-managed fields.
 	req.Status = models.StatusSubmitted
+	req.Notes = ""
+	req.AssignedUserID = nil
+	req.StudentUserID = nil
+	req.OrientationAt = nil
 	if err := h.DB.Create(&req).Error; err != nil {
 		return c.JSON(http.StatusInternalServerError, errResponse("could not submit enrollment"))
 	}
@@ -114,7 +126,7 @@ func (h Handler) GenerateInvite(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, errResponse(err.Error()))
 	}
-	claimURL := fmt.Sprintf("%s/claim-invitation?token=%s", c.Request().Header.Get("Origin"), invite.Token)
+	claimURL := fmt.Sprintf("%s/claim-invitation?token=%s", strings.TrimRight(h.Cfg.FrontendURL, "/"), invite.Token)
 	return c.JSON(http.StatusCreated, map[string]any{
 		"invitation": invite,
 		"claim_url":  claimURL,
@@ -175,16 +187,28 @@ func (h Handler) StudentDashboard(c echo.Context) error {
 	h.DB.Where("student_profile_id = ?", profile.ID).Order("created_at asc").Find(&milestones)
 	var comments []models.CapstoneComment
 	h.DB.Where("student_profile_id = ?", profile.ID).Order("created_at asc").Find(&comments)
+	var reports []models.ProgressReport
+	h.DB.Where("student_profile_id = ?", profile.ID).Order("created_at desc").Find(&reports)
+	var extensions []models.ExtensionRequest
+	h.DB.Where("student_profile_id = ?", profile.ID).Order("created_at desc").Find(&extensions)
+	var submissions []models.Submission
+	h.DB.Where("student_profile_id = ?", profile.ID).Order("created_at desc").Find(&submissions)
 	return c.JSON(http.StatusOK, map[string]any{
-		"profile":    profile,
-		"enrollment": enrollment,
-		"milestones": milestones,
-		"comments":   comments,
+		"profile":          profile,
+		"enrollment":       enrollment,
+		"milestones":       milestones,
+		"comments":         comments,
+		"progress_reports": progressReportsJSON(reports),
+		"extensions":       extensionsJSON(extensions),
+		"submissions":      submissionsJSON(submissions),
 	})
 }
 
 func (h Handler) UpdateCapstone(c echo.Context) error {
-	var req struct{ Title, Summary string }
+	var req struct {
+		Title   string `json:"title"`
+		Summary string `json:"summary"`
+	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, errResponse("invalid request body"))
 	}
@@ -196,29 +220,83 @@ func (h Handler) UpdateCapstone(c echo.Context) error {
 	return c.JSON(http.StatusOK, profile)
 }
 
+// UpdateMilestone lets a student update the STATUS of one of their OWN
+// milestones. Feedback is a mentor-only field and is never accepted here.
 func (h Handler) UpdateMilestone(c echo.Context) error {
 	milestoneID, err := uuid.Parse(c.Param("mid"))
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, errResponse("invalid milestone id"))
 	}
-	var req struct {
-		Status   string `json:"status"`
-		Feedback string `json:"feedback"`
-	}
-	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, errResponse("invalid request body"))
+	var profile models.StudentProfile
+	if err := h.DB.Where("user_id = ?", c.Get("user_id")).First(&profile).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("student profile not found"))
 	}
 	var milestone models.CapstoneMilestone
 	if err := h.DB.First(&milestone, "id = ?", milestoneID).Error; err != nil {
 		return c.JSON(http.StatusNotFound, errResponse("milestone not found"))
 	}
+	// Ownership check: students may only touch their own milestones.
+	if milestone.StudentProfileID != profile.ID {
+		return c.JSON(http.StatusNotFound, errResponse("milestone not found"))
+	}
+	var req struct {
+		Status string `json:"status"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid request body"))
+	}
+	// Students may work a milestone and submit it for review, but only a
+	// mentor can mark it completed — completion is a sign-off, not a
+	// self-report.
+	switch req.Status {
+	case "", "pending", "in_progress", "pending_review":
+		// allowed
+	case "completed":
+		return c.JSON(http.StatusForbidden, errResponse("completion requires mentor sign-off — submit the milestone for review instead"))
+	default:
+		return c.JSON(http.StatusBadRequest, errResponse("status must be pending, in_progress, or pending_review"))
+	}
+	// A mentor-completed milestone is locked for the student; ask a mentor to
+	// reopen it.
+	if milestone.Status == "completed" {
+		return c.JSON(http.StatusConflict, errResponse("milestone is completed and locked — ask a mentor to reopen it"))
+	}
+	h.applyMilestoneUpdate(&milestone, req.Status, nil)
+	return c.JSON(http.StatusOK, milestone)
+}
+
+// validMilestoneStatus whitelists the milestone status values mentors may set.
+func validMilestoneStatus(status string) bool {
+	switch status {
+	case "pending", "in_progress", "pending_review", "completed":
+		return true
+	}
+	return false
+}
+
+// applyMilestoneUpdate applies a status change (and, for mentors, feedback) to a
+// milestone, then recomputes the owning profile's progress. A nil feedback
+// pointer leaves the feedback field untouched.
+func (h Handler) applyMilestoneUpdate(milestone *models.CapstoneMilestone, status string, feedback *string) {
 	updates := map[string]any{}
-	if req.Status != "" { updates["status"] = req.Status }
-	if req.Feedback != "" { updates["feedback"] = req.Feedback }
-	if req.Status == "completed" { now := time.Now(); updates["completed_at"] = &now }
-	h.DB.Model(&milestone).Updates(updates)
-	h.DB.First(&milestone, "id = ?", milestoneID)
-	// Update profile progress based on completed milestones
+	if status != "" {
+		updates["status"] = status
+		if status == "completed" {
+			now := time.Now()
+			updates["completed_at"] = &now
+		} else {
+			// Un-completing a milestone clears its stale completion timestamp.
+			updates["completed_at"] = nil
+		}
+	}
+	if feedback != nil {
+		updates["feedback"] = *feedback
+	}
+	if len(updates) > 0 {
+		h.DB.Model(milestone).Updates(updates)
+		h.DB.First(milestone, "id = ?", milestone.ID)
+	}
+	// Update profile progress based on completed milestones.
 	var total, completed int64
 	h.DB.Model(&models.CapstoneMilestone{}).Where("student_profile_id = ?", milestone.StudentProfileID).Count(&total)
 	h.DB.Model(&models.CapstoneMilestone{}).Where("student_profile_id = ? AND status = ?", milestone.StudentProfileID, "completed").Count(&completed)
@@ -226,11 +304,12 @@ func (h Handler) UpdateMilestone(c echo.Context) error {
 		pct := int((completed * 100) / total)
 		h.DB.Model(&models.StudentProfile{}).Where("id = ?", milestone.StudentProfileID).Update("progress_pct", pct)
 	}
-	return c.JSON(http.StatusOK, milestone)
 }
 
 func (h Handler) PostComment(c echo.Context) error {
-	var req struct{ Message string }
+	var req struct {
+		Message string `json:"message"`
+	}
 	if err := c.Bind(&req); err != nil || strings.TrimSpace(req.Message) == "" {
 		return c.JSON(http.StatusBadRequest, errResponse("message is required"))
 	}
@@ -238,9 +317,11 @@ func (h Handler) PostComment(c echo.Context) error {
 	if err := h.DB.Preload("StudentProfile").First(&user, "id = ?", c.Get("user_id")).Error; err != nil {
 		return c.JSON(http.StatusNotFound, errResponse("user not found"))
 	}
-	profileID := user.StudentProfile.ID
+	if user.StudentProfile == nil {
+		return c.JSON(http.StatusNotFound, errResponse("student profile not found"))
+	}
 	comment := models.CapstoneComment{
-		StudentProfileID: profileID,
+		StudentProfileID: user.StudentProfile.ID,
 		AuthorName:       user.FullName,
 		AuthorRole:       user.Role,
 		Message:          req.Message,
@@ -261,14 +342,26 @@ func (h Handler) AdminStudentDetail(c echo.Context) error {
 	if err := h.DB.Preload("StudentProfile").First(&user, "id = ?", sid).Error; err != nil {
 		return c.JSON(http.StatusNotFound, errResponse("student not found"))
 	}
+	if user.StudentProfile == nil {
+		return c.JSON(http.StatusNotFound, errResponse("student profile not found"))
+	}
 	profile := user.StudentProfile
 	var milestones []models.CapstoneMilestone
 	h.DB.Where("student_profile_id = ?", profile.ID).Order("created_at asc").Find(&milestones)
 	var comments []models.CapstoneComment
 	h.DB.Where("student_profile_id = ?", profile.ID).Order("created_at asc").Find(&comments)
+	var reports []models.ProgressReport
+	h.DB.Where("student_profile_id = ?", profile.ID).Order("created_at desc").Find(&reports)
+	var extensions []models.ExtensionRequest
+	h.DB.Where("student_profile_id = ?", profile.ID).Order("created_at desc").Find(&extensions)
+	var submissions []models.Submission
+	h.DB.Where("student_profile_id = ?", profile.ID).Order("created_at desc").Find(&submissions)
 	return c.JSON(http.StatusOK, map[string]any{
 		"user": publicUser(user), "profile": profile,
 		"milestones": milestones, "comments": comments,
+		"progress_reports": progressReportsJSON(reports),
+		"extensions":       extensionsJSON(extensions),
+		"submissions":      submissionsJSON(submissions),
 	})
 }
 
@@ -278,7 +371,9 @@ func (h Handler) AdminPostComment(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, errResponse("invalid student id"))
 	}
-	var req struct{ Message string }
+	var req struct {
+		Message string `json:"message"`
+	}
 	if err := c.Bind(&req); err != nil || strings.TrimSpace(req.Message) == "" {
 		return c.JSON(http.StatusBadRequest, errResponse("message is required"))
 	}
@@ -289,6 +384,9 @@ func (h Handler) AdminPostComment(c echo.Context) error {
 	var targetUser models.User
 	if err := h.DB.Preload("StudentProfile").First(&targetUser, "id = ?", sid).Error; err != nil {
 		return c.JSON(http.StatusNotFound, errResponse("student not found"))
+	}
+	if targetUser.StudentProfile == nil {
+		return c.JSON(http.StatusNotFound, errResponse("student profile not found"))
 	}
 	comment := models.CapstoneComment{
 		StudentProfileID: targetUser.StudentProfile.ID,
@@ -302,9 +400,47 @@ func (h Handler) AdminPostComment(c echo.Context) error {
 	return c.JSON(http.StatusCreated, comment)
 }
 
-// Admin milestone update with feedback
+// AdminUpdateMilestone lets a mentor/admin update the status AND feedback of a
+// milestone. It validates that the :id student owns the :mid milestone.
 func (h Handler) AdminUpdateMilestone(c echo.Context) error {
-	return h.UpdateMilestone(c)
+	studentID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid student id"))
+	}
+	milestoneID, err := uuid.Parse(c.Param("mid"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid milestone id"))
+	}
+	var profile models.StudentProfile
+	if err := h.DB.Where("user_id = ?", studentID).First(&profile).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("student not found"))
+	}
+	var milestone models.CapstoneMilestone
+	if err := h.DB.First(&milestone, "id = ?", milestoneID).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("milestone not found"))
+	}
+	if milestone.StudentProfileID != profile.ID {
+		return c.JSON(http.StatusNotFound, errResponse("milestone not found"))
+	}
+	var req struct {
+		Status   string  `json:"status"`
+		Feedback *string `json:"feedback"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid request body"))
+	}
+	if req.Status != "" && !validMilestoneStatus(req.Status) {
+		return c.JSON(http.StatusBadRequest, errResponse("status must be pending, in_progress, pending_review, or completed"))
+	}
+	// A present-but-empty feedback string is a deliberate clear; an absent field
+	// leaves feedback untouched. The admin UI prefills the existing value.
+	var feedback *string
+	if req.Feedback != nil {
+		trimmed := strings.TrimSpace(*req.Feedback)
+		feedback = &trimmed
+	}
+	h.applyMilestoneUpdate(&milestone, req.Status, feedback)
+	return c.JSON(http.StatusOK, milestone)
 }
 
 // ListStudents returns all users with the student role
@@ -434,29 +570,29 @@ func (h Handler) AdminUpdateEvent(c echo.Context) error {
 		return c.JSON(http.StatusNotFound, errResponse("event not found"))
 	}
 	var req struct {
-		Title       string `json:"title"`
-		Description string `json:"description"`
-		Date        string `json:"date"`
-		Location    string `json:"location"`
-		Capacity    int    `json:"capacity"`
-		IsPublished bool   `json:"is_published"`
-		ImageURL    string `json:"image_url"`
-		Slug        string `json:"slug"`
+		Title       *string `json:"title"`
+		Description *string `json:"description"`
+		Date        *string `json:"date"`
+		Location    *string `json:"location"`
+		Capacity    *int    `json:"capacity"`
+		IsPublished *bool   `json:"is_published"`
+		ImageURL    *string `json:"image_url"`
+		Slug        *string `json:"slug"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, errResponse("invalid body"))
 	}
-	if req.Title != "" { event.Title = req.Title }
-	if req.Description != "" { event.Description = req.Description }
-	if req.Location != "" { event.Location = req.Location }
-	if req.ImageURL != "" { event.ImageURL = req.ImageURL }
-	if req.Slug != "" { event.Slug = req.Slug }
-	if req.Capacity > 0 { event.Capacity = req.Capacity }
-	event.IsPublished = req.IsPublished
-	if req.Date != "" {
-		parsed, err := time.Parse("2006-01-02T15:04", req.Date)
+	if req.Title != nil { event.Title = *req.Title }
+	if req.Description != nil { event.Description = *req.Description }
+	if req.Location != nil { event.Location = *req.Location }
+	if req.ImageURL != nil { event.ImageURL = *req.ImageURL }
+	if req.Slug != nil { event.Slug = *req.Slug }
+	if req.Capacity != nil { event.Capacity = *req.Capacity }
+	if req.IsPublished != nil { event.IsPublished = *req.IsPublished }
+	if req.Date != nil && *req.Date != "" {
+		parsed, err := time.Parse("2006-01-02T15:04", *req.Date)
 		if err != nil {
-			parsed, err = time.Parse(time.RFC3339, req.Date)
+			parsed, err = time.Parse(time.RFC3339, *req.Date)
 		}
 		if err == nil { event.Date = parsed }
 	}
@@ -503,17 +639,66 @@ func (h Handler) AdminBroadcast(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, errResponse("invalid event id"))
 	}
-	var req struct{ Subject, Message string }
-	if err := c.Bind(&req); err != nil || req.Message == "" {
+	var event models.Event
+	if err := h.DB.First(&event, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("event not found"))
+	}
+	var req struct {
+		Subject string `json:"subject"`
+		Message string `json:"message"`
+	}
+	if err := c.Bind(&req); err != nil || strings.TrimSpace(req.Message) == "" {
 		return c.JSON(http.StatusBadRequest, errResponse("message is required"))
 	}
+
 	var reservations []models.Reservation
 	h.DB.Where("event_id = ? AND status = ?", id, "confirmed").Find(&reservations)
-	// Log the broadcast (SMTP integration can be added later)
-	fmt.Printf("[BROADCAST] Event %s | Subject: %s | Recipients: %d\n", id, req.Subject, len(reservations))
+	recipients := make([]string, 0, len(reservations))
+	for _, r := range reservations {
+		if strings.TrimSpace(r.Email) != "" {
+			recipients = append(recipients, r.Email)
+		}
+	}
+
+	broadcast := models.Broadcast{
+		EventID:        id,
+		Subject:        req.Subject,
+		Message:        req.Message,
+		RecipientCount: len(recipients),
+		Status:         "queued",
+	}
+	if err := h.DB.Create(&broadcast).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not save broadcast"))
+	}
+
+	sent := false
+	var sendErr error
+	if h.Cfg.SMTPConfigured() && len(recipients) > 0 {
+		if sendErr = services.SendBroadcastEmail(h.Cfg, recipients, req.Subject, req.Message); sendErr == nil {
+			now := time.Now().UTC()
+			broadcast.Status = "sent"
+			broadcast.SentAt = &now
+			h.DB.Model(&broadcast).Updates(map[string]any{"status": "sent", "sent_at": &now})
+			sent = true
+		} else {
+			// Keep the stored broadcast as 'queued' but make the failure diagnosable.
+			c.Logger().Errorf("broadcast %s: SMTP send failed: %v", broadcast.ID, sendErr)
+		}
+	}
+
+	message := "broadcast stored and queued — email not sent (SMTP not configured)"
+	if sent {
+		message = "broadcast sent"
+	} else if len(recipients) == 0 {
+		message = "broadcast stored — no confirmed recipients to email"
+	} else if h.Cfg.SMTPConfigured() {
+		message = "broadcast stored and queued — email delivery failed"
+	}
+
 	return c.JSON(http.StatusOK, map[string]any{
-		"message":    "broadcast queued",
-		"recipients": len(reservations),
+		"message":    message,
+		"recipients": broadcast.RecipientCount,
+		"status":     broadcast.Status,
 		"subject":    req.Subject,
 	})
 }
@@ -529,7 +714,9 @@ func (h Handler) CreateQuote(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, errResponse("name, email, and message are required"))
 	}
 	req.Email = strings.ToLower(req.Email)
+	// Public endpoint: admin-managed fields must not be settable by the caller.
 	req.Status = "new"
+	req.AdminNotes = ""
 	if err := h.DB.Create(&req).Error; err != nil {
 		return c.JSON(http.StatusInternalServerError, errResponse("could not submit quote request"))
 	}
@@ -577,7 +764,10 @@ func (h Handler) AdminUpdateQuote(c echo.Context) error {
 // --- Chat ---
 
 func (h Handler) Chat(c echo.Context) error {
-	var req struct{ SessionID, Question string }
+	var req struct {
+		SessionID string `json:"session_id"`
+		Question  string `json:"question"`
+	}
 	if err := c.Bind(&req); err != nil || strings.TrimSpace(req.Question) == "" {
 		return c.JSON(http.StatusBadRequest, errResponse("question is required"))
 	}
@@ -600,18 +790,59 @@ func (h Handler) Chat(c echo.Context) error {
 // --- Admin User Management ---
 
 func (h Handler) CreateUser(c echo.Context) error {
-	var req struct{ Email, FullName, Password string; Role models.Role }
+	var req struct {
+		Email    string      `json:"email"`
+		FullName string      `json:"full_name"`
+		Password string      `json:"password"`
+		Role     models.Role `json:"role"`
+	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, errResponse("invalid request body"))
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-	if err != nil || len(req.Password) < 10 {
+	// Validate before doing any expensive work.
+	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
+	req.FullName = strings.TrimSpace(req.FullName)
+	if req.Email == "" || !strings.Contains(req.Email, "@") {
+		return c.JSON(http.StatusBadRequest, errResponse("a valid email is required"))
+	}
+	if req.FullName == "" {
+		return c.JSON(http.StatusBadRequest, errResponse("full name is required"))
+	}
+	if len(req.Password) < 10 {
 		return c.JSON(http.StatusBadRequest, errResponse("password must be at least 10 characters"))
 	}
-	user := models.User{Email: strings.ToLower(req.Email), FullName: req.FullName, PasswordHash: string(hash), Role: req.Role, IsActive: true}
-	if user.Role == "" { user.Role = models.RoleAdmissions }
+	// Whitelist roles. Students are created only through invitation claims.
+	role := req.Role
+	if role == "" {
+		role = models.RoleAdmissions
+	}
+	switch role {
+	case models.RoleAdmin, models.RoleAdmissions, models.RoleSuperAdmin:
+		// allowed
+	default:
+		return c.JSON(http.StatusBadRequest, errResponse("invalid role"))
+	}
+	// Only a super admin may mint another super admin.
+	if role == models.RoleSuperAdmin {
+		callerRole, _ := c.Get("role").(models.Role)
+		if callerRole != models.RoleSuperAdmin {
+			return c.JSON(http.StatusForbidden, errResponse("only a super admin can create a super admin"))
+		}
+	}
+	// Reject duplicate emails with a clean message instead of leaking the raw
+	// DB constraint error.
+	var existing int64
+	h.DB.Model(&models.User{}).Where("email = ?", req.Email).Count(&existing)
+	if existing > 0 {
+		return c.JSON(http.StatusConflict, errResponse("a user with that email already exists"))
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not create user"))
+	}
+	user := models.User{Email: req.Email, FullName: req.FullName, PasswordHash: string(hash), Role: role, IsActive: true}
 	if err := h.DB.Create(&user).Error; err != nil {
-		return c.JSON(http.StatusBadRequest, errResponse(err.Error()))
+		return c.JSON(http.StatusConflict, errResponse("could not create user"))
 	}
 	return c.JSON(http.StatusCreated, publicUser(user))
 }
@@ -696,26 +927,26 @@ func (h Handler) AdminUpdateProduct(c echo.Context) error {
 		return c.JSON(http.StatusNotFound, errResponse("product not found"))
 	}
 	var req struct {
-		Name        string  `json:"name"`
-		Description string  `json:"description"`
-		Price       float64 `json:"price"`
-		Stock       int     `json:"stock"`
-		ImageURL    string  `json:"image_url"`
-		Specs       string  `json:"specs"`
-		IsPublished bool    `json:"is_published"`
-		Slug        string  `json:"slug"`
+		Name        *string  `json:"name"`
+		Description *string  `json:"description"`
+		Price       *float64 `json:"price"`
+		Stock       *int     `json:"stock"`
+		ImageURL    *string  `json:"image_url"`
+		Specs       *string  `json:"specs"`
+		IsPublished *bool    `json:"is_published"`
+		Slug        *string  `json:"slug"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, errResponse("invalid body"))
 	}
-	if req.Name != "" { row.Name = req.Name }
-	if req.Description != "" { row.Description = req.Description }
-	if req.Specs != "" { row.Specs = req.Specs }
-	if req.ImageURL != "" { row.ImageURL = req.ImageURL }
-	if req.Slug != "" { row.Slug = req.Slug }
-	row.Price = req.Price
-	row.Stock = req.Stock
-	row.IsPublished = req.IsPublished
+	if req.Name != nil { row.Name = *req.Name }
+	if req.Description != nil { row.Description = *req.Description }
+	if req.Specs != nil { row.Specs = *req.Specs }
+	if req.ImageURL != nil { row.ImageURL = *req.ImageURL }
+	if req.Slug != nil { row.Slug = *req.Slug }
+	if req.Price != nil { row.Price = *req.Price }
+	if req.Stock != nil { row.Stock = *req.Stock }
+	if req.IsPublished != nil { row.IsPublished = *req.IsPublished }
 
 	if err := h.DB.Save(&row).Error; err != nil {
 		return c.JSON(http.StatusInternalServerError, errResponse("could not update product"))
@@ -732,6 +963,434 @@ func (h Handler) AdminDeleteProduct(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, errResponse("could not delete product"))
 	}
 	return c.JSON(http.StatusOK, map[string]string{"message": "product deleted"})
+}
+
+// --- Capstone progress reports & extension requests ---
+
+// progressReportJSON renders a ProgressReport exactly per the API contract:
+// the period_* dates are YYYY-MM-DD strings while timestamps stay RFC3339.
+func progressReportJSON(pr models.ProgressReport) map[string]any {
+	return map[string]any{
+		"id":                  pr.ID,
+		"created_at":          pr.CreatedAt,
+		"student_profile_id":  pr.StudentProfileID,
+		"period_start":        pr.PeriodStart.Format("2006-01-02"),
+		"period_end":          pr.PeriodEnd.Format("2006-01-02"),
+		"accomplishments":     pr.Accomplishments,
+		"challenges":          pr.Challenges,
+		"status":              pr.Status,
+		"supervisor_feedback": pr.SupervisorFeedback,
+		"reviewed_at":         pr.ReviewedAt,
+	}
+}
+
+// extensionJSON renders an ExtensionRequest exactly per the API contract:
+// requested_deadline is a YYYY-MM-DD string while timestamps stay RFC3339.
+func extensionJSON(e models.ExtensionRequest) map[string]any {
+	return map[string]any{
+		"id":                 e.ID,
+		"created_at":         e.CreatedAt,
+		"student_profile_id": e.StudentProfileID,
+		"extension_type":     e.ExtensionType,
+		"requested_deadline": e.RequestedDeadline.Format("2006-01-02"),
+		"reason":             e.Reason,
+		"status":             e.Status,
+		"decision_note":      e.DecisionNote,
+		"decided_at":         e.DecidedAt,
+	}
+}
+
+func progressReportsJSON(rows []models.ProgressReport) []map[string]any {
+	out := make([]map[string]any, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, progressReportJSON(r))
+	}
+	return out
+}
+
+func extensionsJSON(rows []models.ExtensionRequest) []map[string]any {
+	out := make([]map[string]any, 0, len(rows))
+	for _, e := range rows {
+		out = append(out, extensionJSON(e))
+	}
+	return out
+}
+
+// CreateProgressReport lets a student submit a progress report against their
+// OWN capstone. Server owns status/feedback/reviewed_at.
+func (h Handler) CreateProgressReport(c echo.Context) error {
+	var profile models.StudentProfile
+	if err := h.DB.Where("user_id = ?", c.Get("user_id")).First(&profile).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("student profile not found"))
+	}
+	var req struct {
+		PeriodStart     string `json:"period_start"`
+		PeriodEnd       string `json:"period_end"`
+		Accomplishments string `json:"accomplishments"`
+		Challenges      string `json:"challenges"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid request body"))
+	}
+	if strings.TrimSpace(req.Accomplishments) == "" {
+		return c.JSON(http.StatusBadRequest, errResponse("accomplishments are required"))
+	}
+	start, err := time.Parse("2006-01-02", req.PeriodStart)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("period_start must be a valid YYYY-MM-DD date"))
+	}
+	end, err := time.Parse("2006-01-02", req.PeriodEnd)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("period_end must be a valid YYYY-MM-DD date"))
+	}
+	report := models.ProgressReport{
+		StudentProfileID: profile.ID,
+		PeriodStart:      start,
+		PeriodEnd:        end,
+		Accomplishments:  req.Accomplishments,
+		Challenges:       req.Challenges,
+		Status:           "submitted",
+	}
+	if err := h.DB.Create(&report).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not submit progress report"))
+	}
+	return c.JSON(http.StatusCreated, progressReportJSON(report))
+}
+
+// CreateExtensionRequest lets a student request a deadline extension on their
+// OWN capstone. Server owns status/decision_note/decided_at.
+func (h Handler) CreateExtensionRequest(c echo.Context) error {
+	var profile models.StudentProfile
+	if err := h.DB.Where("user_id = ?", c.Get("user_id")).First(&profile).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("student profile not found"))
+	}
+	var req struct {
+		ExtensionType     string `json:"extension_type"`
+		RequestedDeadline string `json:"requested_deadline"`
+		Reason            string `json:"reason"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid request body"))
+	}
+	if strings.TrimSpace(req.ExtensionType) == "" {
+		return c.JSON(http.StatusBadRequest, errResponse("extension_type is required"))
+	}
+	if strings.TrimSpace(req.Reason) == "" {
+		return c.JSON(http.StatusBadRequest, errResponse("reason is required"))
+	}
+	deadline, err := time.Parse("2006-01-02", req.RequestedDeadline)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("requested_deadline must be a valid YYYY-MM-DD date"))
+	}
+	ext := models.ExtensionRequest{
+		StudentProfileID:  profile.ID,
+		ExtensionType:     req.ExtensionType,
+		RequestedDeadline: deadline,
+		Reason:            req.Reason,
+		Status:            "pending",
+	}
+	if err := h.DB.Create(&ext).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not submit extension request"))
+	}
+	return c.JSON(http.StatusCreated, extensionJSON(ext))
+}
+
+// AdminRespondProgressReport lets a mentor/admin set supervisor feedback and
+// mark a report reviewed. Feedback uses pointer semantics so an empty string
+// deliberately clears it (mirrors AdminUpdateMilestone).
+func (h Handler) AdminRespondProgressReport(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid progress report id"))
+	}
+	var report models.ProgressReport
+	if err := h.DB.First(&report, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("progress report not found"))
+	}
+	var req struct {
+		SupervisorFeedback *string `json:"supervisor_feedback"`
+		Status             string  `json:"status"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid request body"))
+	}
+	updates := map[string]any{}
+	if req.Status != "" {
+		switch req.Status {
+		case "submitted", "reviewed":
+			updates["status"] = req.Status
+			if req.Status == "reviewed" {
+				now := time.Now()
+				updates["reviewed_at"] = &now
+			} else {
+				updates["reviewed_at"] = nil
+			}
+		default:
+			return c.JSON(http.StatusBadRequest, errResponse("status must be submitted or reviewed"))
+		}
+	}
+	if req.SupervisorFeedback != nil {
+		updates["supervisor_feedback"] = strings.TrimSpace(*req.SupervisorFeedback)
+	}
+	if len(updates) > 0 {
+		if err := h.DB.Model(&report).Updates(updates).Error; err != nil {
+			return c.JSON(http.StatusInternalServerError, errResponse("could not update progress report"))
+		}
+		h.DB.First(&report, "id = ?", id)
+	}
+	return c.JSON(http.StatusOK, progressReportJSON(report))
+}
+
+// AdminRespondExtension lets a mentor/admin approve or deny an extension request
+// with a decision note. decision_note uses pointer semantics so an empty string
+// deliberately clears it.
+func (h Handler) AdminRespondExtension(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid extension request id"))
+	}
+	var ext models.ExtensionRequest
+	if err := h.DB.First(&ext, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("extension request not found"))
+	}
+	var req struct {
+		Status       string  `json:"status"`
+		DecisionNote *string `json:"decision_note"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid request body"))
+	}
+	updates := map[string]any{}
+	if req.Status != "" {
+		switch req.Status {
+		case "pending", "approved", "denied":
+			updates["status"] = req.Status
+			if req.Status == "approved" || req.Status == "denied" {
+				now := time.Now()
+				updates["decided_at"] = &now
+			} else {
+				updates["decided_at"] = nil
+			}
+		default:
+			return c.JSON(http.StatusBadRequest, errResponse("status must be pending, approved, or denied"))
+		}
+	}
+	if req.DecisionNote != nil {
+		updates["decision_note"] = strings.TrimSpace(*req.DecisionNote)
+	}
+	if len(updates) > 0 {
+		if err := h.DB.Model(&ext).Updates(updates).Error; err != nil {
+			return c.JSON(http.StatusInternalServerError, errResponse("could not update extension request"))
+		}
+		h.DB.First(&ext, "id = ?", id)
+	}
+	return c.JSON(http.StatusOK, extensionJSON(ext))
+}
+
+// --- Submissions (file uploads) ---
+
+// maxSubmissionSize caps uploaded files at 15 MB.
+const maxSubmissionSize = 15 * 1024 * 1024
+
+// allowedSubmissionExts whitelists file extensions (lower-case, with the dot)
+// that students may upload. Anything else is rejected with a clean message.
+var allowedSubmissionExts = map[string]bool{
+	".pdf": true, ".doc": true, ".docx": true, ".ppt": true, ".pptx": true,
+	".xls": true, ".xlsx": true, ".png": true, ".jpg": true, ".jpeg": true,
+	".zip": true, ".txt": true, ".md": true, ".csv": true,
+}
+
+// submissionJSON renders a Submission exactly per the API contract. The opaque
+// storage key is never exposed; size is the byte count; reviewed_at is RFC3339
+// or null.
+func submissionJSON(s models.Submission) map[string]any {
+	return map[string]any{
+		"id":                 s.ID,
+		"created_at":         s.CreatedAt,
+		"student_profile_id": s.StudentProfileID,
+		"title":              s.Title,
+		"kind":               s.Kind,
+		"file_name":          s.FileName,
+		"content_type":       s.ContentType,
+		"size":               s.Size,
+		"status":             s.Status,
+		"review_note":        s.ReviewNote,
+		"reviewed_at":        s.ReviewedAt,
+	}
+}
+
+func submissionsJSON(rows []models.Submission) []map[string]any {
+	out := make([]map[string]any, 0, len(rows))
+	for _, s := range rows {
+		out = append(out, submissionJSON(s))
+	}
+	return out
+}
+
+// CreateSubmission accepts a multipart/form-data upload from a student against
+// their OWN profile. The file is stored under a server-generated opaque key;
+// the client filename is kept for display only, never used as a key.
+func (h Handler) CreateSubmission(c echo.Context) error {
+	var profile models.StudentProfile
+	if err := h.DB.Where("user_id = ?", c.Get("user_id")).First(&profile).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("student profile not found"))
+	}
+	title := strings.TrimSpace(c.FormValue("title"))
+	if title == "" {
+		return c.JSON(http.StatusBadRequest, errResponse("title is required"))
+	}
+	kind := strings.TrimSpace(c.FormValue("kind"))
+
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("a file is required"))
+	}
+	if fileHeader.Size <= 0 {
+		return c.JSON(http.StatusBadRequest, errResponse("the uploaded file is empty"))
+	}
+	if fileHeader.Size > maxSubmissionSize {
+		return c.JSON(http.StatusBadRequest, errResponse("file too large — the maximum upload size is 15 MB"))
+	}
+
+	ext := strings.ToLower(filepath.Ext(fileHeader.Filename))
+	if !allowedSubmissionExts[ext] {
+		return c.JSON(http.StatusBadRequest, errResponse("unsupported file type — allowed: pdf, doc, docx, ppt, pptx, xls, xlsx, png, jpg, jpeg, zip, txt, md, csv"))
+	}
+
+	// Content type: trust the derived extension over the client-supplied header.
+	contentType := mime.TypeByExtension(ext)
+	if contentType == "" {
+		contentType = fileHeader.Header.Get("Content-Type")
+	}
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+
+	src, err := fileHeader.Open()
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("could not read the uploaded file"))
+	}
+	defer src.Close()
+
+	key := "submissions/" + uuid.NewString() + ext
+	if err := h.Store.Save(key, src, fileHeader.Size, contentType); err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not store the uploaded file"))
+	}
+
+	submission := models.Submission{
+		StudentProfileID: profile.ID,
+		Title:            title,
+		Kind:             kind,
+		FileName:         filepath.Base(fileHeader.Filename),
+		StoredKey:        key,
+		ContentType:      contentType,
+		Size:             fileHeader.Size,
+		Status:           "submitted",
+	}
+	if err := h.DB.Create(&submission).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not save the submission"))
+	}
+	return c.JSON(http.StatusCreated, submissionJSON(submission))
+}
+
+// streamSubmission opens the stored object and streams it to the client as an
+// attachment using the original display filename.
+func (h Handler) streamSubmission(c echo.Context, s models.Submission) error {
+	rc, err := h.Store.Open(s.StoredKey)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("submission file not found"))
+	}
+	defer rc.Close()
+	contentType := s.ContentType
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	filename := s.FileName
+	if filename == "" {
+		filename = "submission"
+	}
+	c.Response().Header().Set(echo.HeaderContentDisposition, fmt.Sprintf("attachment; filename=%q", filename))
+	return c.Stream(http.StatusOK, contentType, rc)
+}
+
+// StudentDownloadSubmission streams a student's OWN submission file.
+func (h Handler) StudentDownloadSubmission(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid submission id"))
+	}
+	var profile models.StudentProfile
+	if err := h.DB.Where("user_id = ?", c.Get("user_id")).First(&profile).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("student profile not found"))
+	}
+	var submission models.Submission
+	if err := h.DB.First(&submission, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("submission not found"))
+	}
+	// Ownership check: students may only download their own submissions.
+	if submission.StudentProfileID != profile.ID {
+		return c.JSON(http.StatusNotFound, errResponse("submission not found"))
+	}
+	return h.streamSubmission(c, submission)
+}
+
+// AdminDownloadSubmission streams any submission's file (no ownership check).
+func (h Handler) AdminDownloadSubmission(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid submission id"))
+	}
+	var submission models.Submission
+	if err := h.DB.First(&submission, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("submission not found"))
+	}
+	return h.streamSubmission(c, submission)
+}
+
+// AdminReviewSubmission lets a mentor/admin accept a submission or request a
+// revision, with an optional review note. review_note uses pointer semantics so
+// an empty string deliberately clears it (mirrors AdminRespondProgressReport).
+func (h Handler) AdminReviewSubmission(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid submission id"))
+	}
+	var submission models.Submission
+	if err := h.DB.First(&submission, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("submission not found"))
+	}
+	var req struct {
+		Status     string  `json:"status"`
+		ReviewNote *string `json:"review_note"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid request body"))
+	}
+	updates := map[string]any{}
+	if req.Status != "" {
+		switch req.Status {
+		case "submitted", "accepted", "revise":
+			updates["status"] = req.Status
+			if req.Status == "accepted" || req.Status == "revise" {
+				now := time.Now()
+				updates["reviewed_at"] = &now
+			} else {
+				updates["reviewed_at"] = nil
+			}
+		default:
+			return c.JSON(http.StatusBadRequest, errResponse("status must be submitted, accepted, or revise"))
+		}
+	}
+	if req.ReviewNote != nil {
+		updates["review_note"] = strings.TrimSpace(*req.ReviewNote)
+	}
+	if len(updates) > 0 {
+		if err := h.DB.Model(&submission).Updates(updates).Error; err != nil {
+			return c.JSON(http.StatusInternalServerError, errResponse("could not update submission"))
+		}
+		h.DB.First(&submission, "id = ?", id)
+	}
+	return c.JSON(http.StatusOK, submissionJSON(submission))
 }
 
 func errResponse(message string) map[string]string { return map[string]string{"error": message} }

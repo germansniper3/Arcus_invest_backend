@@ -7,11 +7,25 @@ import (
 	appmw "arcusinvest/internal/middleware"
 	"arcusinvest/internal/models"
 	"arcusinvest/internal/seed"
+	"arcusinvest/internal/storage"
 	"log"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
+	"golang.org/x/time/rate"
 )
+
+// rateLimiter builds a per-IP in-memory rate limiter allowing perMinute
+// requests per minute (with a matching burst) on the routes it is attached to.
+func rateLimiter(perMinute int) echo.MiddlewareFunc {
+	store := middleware.NewRateLimiterMemoryStoreWithConfig(middleware.RateLimiterMemoryStoreConfig{
+		Rate:      rate.Limit(float64(perMinute) / 60.0),
+		Burst:     perMinute,
+		ExpiresIn: 3 * time.Minute,
+	})
+	return middleware.RateLimiter(store)
+}
 
 func main() {
 	cfg, err := config.Load()
@@ -28,12 +42,20 @@ func main() {
 	if err := seed.Admin(db, cfg); err != nil {
 		log.Fatal(err)
 	}
-	if err := seed.Products(db); err != nil {
+	// Build the file-storage driver (creates the storage dir for the local
+	// driver). Fail fast so a bad STORAGE_DRIVER surfaces at startup.
+	store, err := storage.New(cfg)
+	if err != nil {
 		log.Fatal(err)
 	}
 
 	e := echo.New()
 	e.HideBanner = true
+	// Identify clients by the direct socket address so rate limiting cannot be
+	// bypassed with a spoofed X-Forwarded-For header. If the API is deployed
+	// behind a trusted reverse proxy, switch to echo.ExtractIPFromXFFHeader
+	// with that proxy's ranges configured as trusted.
+	e.IPExtractor = echo.ExtractIPDirect()
 	e.Use(middleware.Recover())
 	e.Use(middleware.Logger())
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
@@ -42,20 +64,23 @@ func main() {
 		AllowHeaders: []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization},
 	}))
 
-	h := handlers.Handler{DB: db, Cfg: cfg}
+	h := handlers.Handler{DB: db, Cfg: cfg, Store: store}
 	api := e.Group("/api/v1")
+
+	// Per-IP rate limiters for unauthenticated POST endpoints. Each endpoint
+	// gets its own store so their budgets do not compete with one another.
 
 	// ── Public ──────────────────────────────────────────────────────────────
 	api.GET("/health", h.Health)
-	api.POST("/auth/login", h.Login)
-	api.POST("/enrollments", h.CreateEnrollment)
-	api.POST("/quotes", h.CreateQuote)
-	api.POST("/chat", h.Chat)
+	api.POST("/auth/login", h.Login, rateLimiter(10))
+	api.POST("/enrollments", h.CreateEnrollment, rateLimiter(20))
+	api.POST("/quotes", h.CreateQuote, rateLimiter(20))
+	api.POST("/chat", h.Chat, rateLimiter(20))
 
 	// Public events
 	api.GET("/events", h.ListPublicEvents)
 	api.GET("/events/:slug", h.GetPublicEvent)
-	api.POST("/events/:id/reserve", h.CreateReservation)
+	api.POST("/events/:id/reserve", h.CreateReservation, rateLimiter(20))
 
 	// Public products
 	api.GET("/products", h.ListPublicProducts)
@@ -63,7 +88,7 @@ func main() {
 
 	// Invitation claim (public — unauthenticated student sets password)
 	api.GET("/invitations/:token", h.PreviewInvitation)
-	api.POST("/invitations/claim", h.ClaimInvitation)
+	api.POST("/invitations/claim", h.ClaimInvitation, rateLimiter(20))
 
 	// ── Protected (any authenticated user) ──────────────────────────────────
 	protected := api.Group("")
@@ -78,6 +103,10 @@ func main() {
 	student.PATCH("/capstone", h.UpdateCapstone)
 	student.PATCH("/milestones/:mid", h.UpdateMilestone)
 	student.POST("/comments", h.PostComment)
+	student.POST("/progress-reports", h.CreateProgressReport)
+	student.POST("/extensions", h.CreateExtensionRequest)
+	student.POST("/submissions", h.CreateSubmission)
+	student.GET("/submissions/:id/file", h.StudentDownloadSubmission)
 
 	// ── Admin ────────────────────────────────────────────────────────────────
 	admin := protected.Group("/admin")
@@ -100,6 +129,10 @@ func main() {
 	admin.GET("/students/:id", h.AdminStudentDetail)
 	admin.POST("/students/:id/comments", h.AdminPostComment)
 	admin.PATCH("/students/:id/milestones/:mid", h.AdminUpdateMilestone)
+	admin.PATCH("/progress-reports/:id", h.AdminRespondProgressReport)
+	admin.PATCH("/extensions/:id", h.AdminRespondExtension)
+	admin.GET("/submissions/:id/file", h.AdminDownloadSubmission)
+	admin.PATCH("/submissions/:id", h.AdminReviewSubmission)
 
 	// Events
 	admin.GET("/events", h.AdminListEvents)

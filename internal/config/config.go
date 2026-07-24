@@ -15,12 +15,25 @@ type Config struct {
 	DatabaseURL   string
 	JWTSecret     string
 	CORSOrigins   []string
+	FrontendURL   string
 	SeedAdminName string
 	SeedAdminEmail string
 	SeedAdminPassword string
 	AIProviderURL string
 	AIAPIKey      string
 	AIModel       string
+	SMTPHost      string
+	SMTPPort      string
+	SMTPUsername  string
+	SMTPPassword  string
+	SMTPFrom      string
+	StorageDriver string
+	StorageDir    string
+	S3Bucket      string
+	S3Region      string
+	S3Endpoint    string
+	S3AccessKey   string
+	S3SecretKey   string
 }
 
 func Load() (*Config, error) {
@@ -31,12 +44,27 @@ func Load() (*Config, error) {
 		DatabaseURL:       os.Getenv("DATABASE_URL"),
 		JWTSecret:         os.Getenv("JWT_SECRET"),
 		CORSOrigins:       split(get("CORS_ORIGINS", "http://localhost:5173,http://localhost:4173")),
+		FrontendURL:       os.Getenv("FRONTEND_URL"),
 		SeedAdminName:     get("SEED_ADMIN_NAME", "Arcus Administrator"),
 		SeedAdminEmail:    get("SEED_ADMIN_EMAIL", "admin@arcusinvest-zm.com"),
 		SeedAdminPassword: get("SEED_ADMIN_PASSWORD", ""),
-		AIProviderURL:     get("AI_PROVIDER_URL", "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2"),
+		AIProviderURL:     get("AI_PROVIDER_URL", "https://generativelanguage.googleapis.com"),
 		AIAPIKey:          os.Getenv("AI_API_KEY"),
-		AIModel:           get("AI_MODEL", "mistralai/Mistral-7B-Instruct-v0.2"),
+		AIModel:           get("AI_MODEL", "gemini-2.5-flash"),
+		SMTPHost:          os.Getenv("SMTP_HOST"),
+		SMTPPort:          os.Getenv("SMTP_PORT"),
+		SMTPUsername:      os.Getenv("SMTP_USERNAME"),
+		SMTPPassword:      os.Getenv("SMTP_PASSWORD"),
+		SMTPFrom:          os.Getenv("SMTP_FROM"),
+		// Storage: local disk by default; S3_* are parsed but only consulted
+		// when STORAGE_DRIVER=s3. None of these are production-required.
+		StorageDriver: get("STORAGE_DRIVER", "local"),
+		StorageDir:    get("STORAGE_DIR", "storage/uploads"),
+		S3Bucket:      os.Getenv("S3_BUCKET"),
+		S3Region:      os.Getenv("S3_REGION"),
+		S3Endpoint:    os.Getenv("S3_ENDPOINT"),
+		S3AccessKey:   os.Getenv("S3_ACCESS_KEY"),
+		S3SecretKey:   os.Getenv("S3_SECRET_KEY"),
 	}
 	if cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")
@@ -50,7 +78,19 @@ func Load() (*Config, error) {
 	if cfg.Env == "production" && cfg.SeedAdminPassword == "" {
 		return nil, fmt.Errorf("SEED_ADMIN_PASSWORD is required in production")
 	}
+	if cfg.Env != "production" && cfg.FrontendURL == "" {
+		cfg.FrontendURL = "http://localhost:5173"
+	}
+	if cfg.Env == "production" && cfg.FrontendURL == "" {
+		return nil, fmt.Errorf("FRONTEND_URL is required in production")
+	}
 	return cfg, nil
+}
+
+// SMTPConfigured reports whether the minimum SMTP settings needed to send mail
+// are present.
+func (c *Config) SMTPConfigured() bool {
+	return c.SMTPHost != "" && c.SMTPPort != "" && c.SMTPFrom != ""
 }
 
 func TokenTTLHours() int {

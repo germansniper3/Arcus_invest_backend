@@ -32,19 +32,26 @@ type geminiResponse struct {
 }
 
 func Chat(cfg *config.Config, question string) (string, string, error) {
-	system := "You are Arcus Assist, the official AI assistant for Arcus Investments in Kitwe, Zambia. You provide helpful information about our engineering services (custom PCB design, mechanical fabrication, machine shop, assembly), the Chofa electric bike platform, and our Innovation Hub student training program. Keep your responses concise, professional, and practical."
-	
+	system := "You are Arcus Assist, the official AI assistant for Arcus Investments in Kitwe, Zambia. You provide helpful information about our engineering services (custom PCB design, mechanical fabrication, machine shop, assembly), the products in our engineering product catalogue, and our Innovation Hub student training program. Keep your responses concise, professional, and practical. Do not invent specific products, prices, or availability — direct users to the product catalogue for those details."
+
+	// No API key configured: serve the local knowledge base rather than
+	// calling the provider.
 	apiKey := cfg.AIAPIKey
 	if apiKey == "" {
-		apiKey = "AIzaSyBn985Fj52LrJ4ftSZawIy1l4HsenBOsRg" // Working token from reference project
+		return fallbackAnswer(question), "local-knowledge-base", nil
 	}
-	
+
 	model := cfg.AIModel
-	if model == "" || strings.Contains(model, "mistralai") {
+	if model == "" {
 		model = "gemini-2.5-flash"
 	}
 
-	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", model, apiKey)
+	baseURL := strings.TrimRight(cfg.AIProviderURL, "/")
+	if baseURL == "" {
+		baseURL = "https://generativelanguage.googleapis.com"
+	}
+
+	url := fmt.Sprintf("%s/v1beta/models/%s:generateContent?key=%s", baseURL, model, apiKey)
 	prompt := fmt.Sprintf("%s\n\nUser Question: %s\n\nArcus Assist:", system, question)
 
 	reqPayload := geminiRequest{
@@ -99,8 +106,8 @@ func fallbackAnswer(question string) string {
 	if strings.Contains(q, "pcb") || strings.Contains(q, "electronics") || strings.Contains(q, "board") {
 		return "Arcus Investments specializes in local custom PCB design, reflow soldering population, debugging, and firmware programming. We help innovators and companies move physical hardware from concept to functional prototype and small-batch production."
 	}
-	if strings.Contains(q, "ebike") || strings.Contains(q, "chofa") || strings.Contains(q, "bike") || strings.Contains(q, "mobility") {
-		return "Our Chofa E-Bike is an electric bicycle platform engineered specifically for local road conditions and daily commuting or delivery routes in Zambia. It addresses rising fuel costs with a robust, locally repairable frame and battery pack system."
+	if strings.Contains(q, "product") || strings.Contains(q, "catalogue") || strings.Contains(q, "catalog") || strings.Contains(q, "buy") || strings.Contains(q, "ebike") || strings.Contains(q, "bike") || strings.Contains(q, "mobility") {
+		return "You can browse our current engineering products, including any electric mobility platforms, on the Products page. Each catalogue entry lists up-to-date specifications, pricing, and availability. Our products are engineered for local conditions and designed to be maintainable and repairable in Zambia."
 	}
 	return "Arcus Investments is a Kitwe, Zambia-based engineering firm providing complete electronic maintenance, PCB prototyping, mechanical fabrication (CNC milling, lathe work, welding), software integration, and innovation mentorship. How can we help you today?"
 }

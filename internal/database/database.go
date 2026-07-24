@@ -27,6 +27,10 @@ func Migrate(db *gorm.DB) error {
 		&models.Reservation{},
 		&models.CapstoneMilestone{},
 		&models.CapstoneComment{},
+		&models.ProgressReport{},
+		&models.ExtensionRequest{},
 		&models.Product{},
+		&models.Broadcast{},
+		&models.Submission{},
 	)
 }
