@@ -152,5 +152,5 @@ func main() {
 	// User management (super-admin + admin only)
 	admin.POST("/users", h.CreateUser, appmw.RequireRoles(models.RoleSuperAdmin, models.RoleAdmin))
 
-	log.Fatal(e.Start(":" + cfg.Port))
+	log.Fatal(e.Start("0.0.0.0:" + cfg.Port))
 }
