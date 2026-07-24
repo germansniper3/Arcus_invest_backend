@@ -9,6 +9,7 @@ import (
 	"arcusinvest/internal/seed"
 	"arcusinvest/internal/storage"
 	"log"
+	"net"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -152,5 +153,10 @@ func main() {
 	// User management (super-admin + admin only)
 	admin.POST("/users", h.CreateUser, appmw.RequireRoles(models.RoleSuperAdmin, models.RoleAdmin))
 
-	log.Fatal(e.Start("0.0.0.0:" + cfg.Port))
+	listener, err := net.Listen("tcp4", "0.0.0.0:"+cfg.Port)
+	if err != nil {
+		log.Fatal(err)
+	}
+	e.Listener = listener
+	log.Fatal(e.Start(""))
 }
