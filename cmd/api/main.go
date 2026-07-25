@@ -120,6 +120,10 @@ func main() {
 	// Quotes / contact
 	admin.GET("/quotes", h.ListQuotes)
 	admin.PATCH("/quotes/:id", h.AdminUpdateQuote)
+	admin.POST("/quotes/:id/convert", h.AdminConvertQuote)
+
+	// Staff directory (owner picker for the pipeline)
+	admin.GET("/staff", h.AdminListStaff)
 
 	// Enrollments
 	admin.GET("/enrollments", h.ListEnrollments)

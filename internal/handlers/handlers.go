@@ -1011,6 +1011,7 @@ func (h Handler) UploadProductImage(c echo.Context) error {
 	name := uuid.NewString() + ext
 	key := "product-images/" + name
 	if err := h.Store.Save(key, src, fileHeader.Size, contentType); err != nil {
+		c.Logger().Errorf("product image storage failed (driver=%s dir=%s key=%s): %v", h.Cfg.StorageDriver, h.Cfg.StorageDir, key, err)
 		return c.JSON(http.StatusInternalServerError, errResponse("could not store the uploaded image"))
 	}
 
@@ -1116,6 +1117,20 @@ func opportunityJSON(o models.Opportunity) map[string]any {
 	}
 }
 
+// AdminListStaff returns active non-student users, used as the owner picker for
+// opportunities. Password hashes are never included (publicUser omits them).
+func (h Handler) AdminListStaff(c echo.Context) error {
+	var users []models.User
+	if err := h.DB.Where("role <> ? AND is_active = ?", models.RoleStudent, true).Order("full_name asc").Find(&users).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not load staff"))
+	}
+	result := make([]map[string]any, 0, len(users))
+	for _, u := range users {
+		result = append(result, publicUser(u))
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
 func (h Handler) AdminListOpportunities(c echo.Context) error {
 	var rows []models.Opportunity
 	q := h.DB.Order("created_at desc")
@@ -1143,6 +1158,7 @@ func (h Handler) AdminCreateOpportunity(c echo.Context) error {
 		Grade           string     `json:"grade"`
 		DealValue       float64    `json:"deal_value"`
 		Probability     *int       `json:"probability"`
+		OwnerID         *uuid.UUID `json:"owner_id"`
 		SourceQuoteID   *uuid.UUID `json:"source_quote_id"`
 		ExpectedCloseAt *time.Time `json:"expected_close_at"`
 		Notes           string     `json:"notes"`
@@ -1188,6 +1204,9 @@ func (h Handler) AdminCreateOpportunity(c echo.Context) error {
 		ExpectedCloseAt: req.ExpectedCloseAt,
 		Notes:           req.Notes,
 	}
+	if req.OwnerID != nil && *req.OwnerID != uuid.Nil {
+		opp.OwnerID = req.OwnerID
+	}
 	if err := h.DB.Create(&opp).Error; err != nil {
 		return c.JSON(http.StatusInternalServerError, errResponse("could not create opportunity"))
 	}
@@ -1213,6 +1232,7 @@ func (h Handler) AdminUpdateOpportunity(c echo.Context) error {
 		Grade           *string    `json:"grade"`
 		DealValue       *float64   `json:"deal_value"`
 		Probability     *int       `json:"probability"`
+		OwnerID         *uuid.UUID `json:"owner_id"`
 		ExpectedCloseAt *time.Time `json:"expected_close_at"`
 		Notes           *string    `json:"notes"`
 	}
@@ -1247,6 +1267,14 @@ func (h Handler) AdminUpdateOpportunity(c echo.Context) error {
 	}
 	if req.Notes != nil {
 		updates["notes"] = *req.Notes
+	}
+	// owner_id: a nil UUID clears the owner (unassign); a real UUID assigns it.
+	if req.OwnerID != nil {
+		if *req.OwnerID == uuid.Nil {
+			updates["owner_id"] = nil
+		} else {
+			updates["owner_id"] = *req.OwnerID
+		}
 	}
 	if req.Grade != nil {
 		grade := models.OpportunityGrade(*req.Grade)
@@ -1287,6 +1315,47 @@ func (h Handler) AdminDeleteOpportunity(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, errResponse("could not delete opportunity"))
 	}
 	return c.JSON(http.StatusOK, map[string]string{"message": "opportunity deleted"})
+}
+
+// AdminConvertQuote turns a lead (quote request) into a pipeline opportunity,
+// carrying over the contact details, linking back via source_quote_id, and
+// marking the quote converted. Converting the same quote twice creates two
+// opportunities — the UI guards against that.
+func (h Handler) AdminConvertQuote(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid quote id"))
+	}
+	var quote models.QuoteRequest
+	if err := h.DB.First(&quote, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("quote request not found"))
+	}
+
+	name := strings.TrimSpace(quote.Service)
+	if name == "" {
+		name = "New opportunity"
+	}
+	account := strings.TrimSpace(quote.Company)
+	if account == "" {
+		account = quote.Name
+	}
+	opp := models.Opportunity{
+		Name:          name,
+		AccountName:   account,
+		ContactName:   quote.Name,
+		ContactEmail:  quote.Email,
+		Stage:         models.StageProspecting,
+		Grade:         models.GradeBronze,
+		Probability:   stageDefaultProbability(models.StageProspecting),
+		SourceQuoteID: &quote.ID,
+		Notes:         quote.Message,
+	}
+	if err := h.DB.Create(&opp).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not create opportunity"))
+	}
+	// Mark the lead converted (best-effort; the opportunity already exists).
+	h.DB.Model(&quote).Update("status", "converted")
+	return c.JSON(http.StatusCreated, opportunityJSON(opp))
 }
 
 // AdminPipelineForecast summarises the pipeline: open value, weighted forecast,
@@ -1665,6 +1734,7 @@ func (h Handler) CreateSubmission(c echo.Context) error {
 
 	key := "submissions/" + uuid.NewString() + ext
 	if err := h.Store.Save(key, src, fileHeader.Size, contentType); err != nil {
+		c.Logger().Errorf("submission storage failed (driver=%s dir=%s key=%s): %v", h.Cfg.StorageDriver, h.Cfg.StorageDir, key, err)
 		return c.JSON(http.StatusInternalServerError, errResponse("could not store the uploaded file"))
 	}
 
