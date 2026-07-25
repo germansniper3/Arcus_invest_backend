@@ -1687,6 +1687,40 @@ func submissionsJSON(rows []models.Submission) []map[string]any {
 	return out
 }
 
+// submissionStageOrder is the gated submission pipeline: each step unlocks only
+// once the previous step has a mentor-accepted submission.
+var submissionStageOrder = []string{"proposal", "report", "final"}
+
+// checkSubmissionGate enforces the Proposal → Report → Final ordering for a
+// student's uploads. It returns (0, "") when the upload is allowed, otherwise an
+// HTTP status code and a message to return to the client.
+func (h Handler) checkSubmissionGate(profileID uuid.UUID, kind string) (int, string) {
+	idx := -1
+	for i, s := range submissionStageOrder {
+		if s == kind {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		return http.StatusBadRequest, "invalid submission type — must be proposal, report or final"
+	}
+	accepted := func(k string) bool {
+		var n int64
+		h.DB.Model(&models.Submission{}).
+			Where("student_profile_id = ? AND kind = ? AND status = ?", profileID, k, "accepted").
+			Count(&n)
+		return n > 0
+	}
+	if accepted(kind) {
+		return http.StatusConflict, "this step is already approved"
+	}
+	if idx > 0 && !accepted(submissionStageOrder[idx-1]) {
+		return http.StatusForbidden, "complete and get approval for the previous step first"
+	}
+	return 0, ""
+}
+
 // CreateSubmission accepts a multipart/form-data upload from a student against
 // their OWN profile. The file is stored under a server-generated opaque key;
 // the client filename is kept for display only, never used as a key.
@@ -1699,7 +1733,15 @@ func (h Handler) CreateSubmission(c echo.Context) error {
 	if title == "" {
 		return c.JSON(http.StatusBadRequest, errResponse("title is required"))
 	}
-	kind := strings.TrimSpace(c.FormValue("kind"))
+	kind := strings.ToLower(strings.TrimSpace(c.FormValue("kind")))
+
+	// Gated pipeline: submissions proceed Proposal → Report → Final. A step
+	// unlocks only once the previous step has a mentor-accepted submission, and
+	// an already-approved step cannot be re-submitted. Enforced here so the gate
+	// cannot be bypassed by calling the API directly.
+	if code, msg := h.checkSubmissionGate(profile.ID, kind); code != 0 {
+		return c.JSON(code, errResponse(msg))
+	}
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
