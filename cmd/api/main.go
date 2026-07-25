@@ -152,6 +152,13 @@ func main() {
 	admin.PUT("/products/:id", h.AdminUpdateProduct)
 	admin.DELETE("/products/:id", h.AdminDeleteProduct)
 
+	// Opportunities (B2B sales pipeline)
+	admin.GET("/opportunities", h.AdminListOpportunities)
+	admin.GET("/opportunities/forecast", h.AdminPipelineForecast)
+	admin.POST("/opportunities", h.AdminCreateOpportunity)
+	admin.PUT("/opportunities/:id", h.AdminUpdateOpportunity)
+	admin.DELETE("/opportunities/:id", h.AdminDeleteOpportunity)
+
 	// User management (super-admin + admin only)
 	admin.POST("/users", h.CreateUser, appmw.RequireRoles(models.RoleSuperAdmin, models.RoleAdmin))
 

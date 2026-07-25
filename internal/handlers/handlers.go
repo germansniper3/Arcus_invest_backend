@@ -1046,6 +1046,316 @@ func (h Handler) ServeProductImage(c echo.Context) error {
 	return c.Stream(http.StatusOK, contentType, rc)
 }
 
+// --- Opportunities (B2B sales pipeline) ---
+
+// validOpportunityStages / validOpportunityGrades whitelist the enum values a
+// client may set. Anything else is rejected before it reaches the database.
+var validOpportunityStages = map[models.OpportunityStage]bool{
+	models.StageProspecting: true, models.StageQualified: true,
+	models.StageProposal: true, models.StageNegotiation: true,
+	models.StageWon: true, models.StageLost: true,
+}
+
+var validOpportunityGrades = map[models.OpportunityGrade]bool{
+	models.GradeBronze: true, models.GradeSilver: true,
+	models.GradeGold: true, models.GradePlatinum: true,
+}
+
+// stageDefaultProbability is the default win-probability seeded when a deal
+// enters a stage (used unless the caller sets an explicit probability).
+func stageDefaultProbability(stage models.OpportunityStage) int {
+	switch stage {
+	case models.StageProspecting:
+		return 10
+	case models.StageQualified:
+		return 30
+	case models.StageProposal:
+		return 50
+	case models.StageNegotiation:
+		return 70
+	case models.StageWon:
+		return 100
+	case models.StageLost:
+		return 0
+	default:
+		return 10
+	}
+}
+
+func clampProbability(p int) int {
+	if p < 0 {
+		return 0
+	}
+	if p > 100 {
+		return 100
+	}
+	return p
+}
+
+// opportunityJSON renders an Opportunity plus the derived weighted_value
+// (deal_value × probability), so the forecast figure is authoritative server-side.
+func opportunityJSON(o models.Opportunity) map[string]any {
+	return map[string]any{
+		"id":                o.ID,
+		"created_at":        o.CreatedAt,
+		"updated_at":        o.UpdatedAt,
+		"name":              o.Name,
+		"account_name":      o.AccountName,
+		"contact_name":      o.ContactName,
+		"contact_email":     o.ContactEmail,
+		"sector":            o.Sector,
+		"stage":             o.Stage,
+		"grade":             o.Grade,
+		"deal_value":        o.DealValue,
+		"probability":       o.Probability,
+		"weighted_value":    o.DealValue * float64(o.Probability) / 100.0,
+		"owner_id":          o.OwnerID,
+		"source_quote_id":   o.SourceQuoteID,
+		"expected_close_at": o.ExpectedCloseAt,
+		"notes":             o.Notes,
+	}
+}
+
+func (h Handler) AdminListOpportunities(c echo.Context) error {
+	var rows []models.Opportunity
+	q := h.DB.Order("created_at desc")
+	if stage := c.QueryParam("stage"); stage != "" {
+		q = q.Where("stage = ?", stage)
+	}
+	if err := q.Find(&rows).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not load opportunities"))
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for _, o := range rows {
+		out = append(out, opportunityJSON(o))
+	}
+	return c.JSON(http.StatusOK, out)
+}
+
+func (h Handler) AdminCreateOpportunity(c echo.Context) error {
+	var req struct {
+		Name            string     `json:"name"`
+		AccountName     string     `json:"account_name"`
+		ContactName     string     `json:"contact_name"`
+		ContactEmail    string     `json:"contact_email"`
+		Sector          string     `json:"sector"`
+		Stage           string     `json:"stage"`
+		Grade           string     `json:"grade"`
+		DealValue       float64    `json:"deal_value"`
+		Probability     *int       `json:"probability"`
+		SourceQuoteID   *uuid.UUID `json:"source_quote_id"`
+		ExpectedCloseAt *time.Time `json:"expected_close_at"`
+		Notes           string     `json:"notes"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid request body"))
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		return c.JSON(http.StatusBadRequest, errResponse("opportunity name is required"))
+	}
+
+	stage := models.OpportunityStage(req.Stage)
+	if stage == "" {
+		stage = models.StageProspecting
+	}
+	if !validOpportunityStages[stage] {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid stage"))
+	}
+	grade := models.OpportunityGrade(req.Grade)
+	if grade == "" {
+		grade = models.GradeBronze
+	}
+	if !validOpportunityGrades[grade] {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid grade"))
+	}
+
+	probability := stageDefaultProbability(stage)
+	if req.Probability != nil {
+		probability = clampProbability(*req.Probability)
+	}
+
+	opp := models.Opportunity{
+		Name:            strings.TrimSpace(req.Name),
+		AccountName:     req.AccountName,
+		ContactName:     req.ContactName,
+		ContactEmail:    req.ContactEmail,
+		Sector:          req.Sector,
+		Stage:           stage,
+		Grade:           grade,
+		DealValue:       req.DealValue,
+		Probability:     probability,
+		SourceQuoteID:   req.SourceQuoteID,
+		ExpectedCloseAt: req.ExpectedCloseAt,
+		Notes:           req.Notes,
+	}
+	if err := h.DB.Create(&opp).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not create opportunity"))
+	}
+	return c.JSON(http.StatusCreated, opportunityJSON(opp))
+}
+
+func (h Handler) AdminUpdateOpportunity(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid opportunity id"))
+	}
+	var row models.Opportunity
+	if err := h.DB.First(&row, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("opportunity not found"))
+	}
+	var req struct {
+		Name            *string    `json:"name"`
+		AccountName     *string    `json:"account_name"`
+		ContactName     *string    `json:"contact_name"`
+		ContactEmail    *string    `json:"contact_email"`
+		Sector          *string    `json:"sector"`
+		Stage           *string    `json:"stage"`
+		Grade           *string    `json:"grade"`
+		DealValue       *float64   `json:"deal_value"`
+		Probability     *int       `json:"probability"`
+		ExpectedCloseAt *time.Time `json:"expected_close_at"`
+		Notes           *string    `json:"notes"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid body"))
+	}
+
+	updates := map[string]any{}
+	if req.Name != nil {
+		if strings.TrimSpace(*req.Name) == "" {
+			return c.JSON(http.StatusBadRequest, errResponse("opportunity name cannot be empty"))
+		}
+		updates["name"] = strings.TrimSpace(*req.Name)
+	}
+	if req.AccountName != nil {
+		updates["account_name"] = *req.AccountName
+	}
+	if req.ContactName != nil {
+		updates["contact_name"] = *req.ContactName
+	}
+	if req.ContactEmail != nil {
+		updates["contact_email"] = *req.ContactEmail
+	}
+	if req.Sector != nil {
+		updates["sector"] = *req.Sector
+	}
+	if req.DealValue != nil {
+		updates["deal_value"] = *req.DealValue
+	}
+	if req.ExpectedCloseAt != nil {
+		updates["expected_close_at"] = *req.ExpectedCloseAt
+	}
+	if req.Notes != nil {
+		updates["notes"] = *req.Notes
+	}
+	if req.Grade != nil {
+		grade := models.OpportunityGrade(*req.Grade)
+		if !validOpportunityGrades[grade] {
+			return c.JSON(http.StatusBadRequest, errResponse("invalid grade"))
+		}
+		updates["grade"] = grade
+	}
+	// Stage change re-seeds probability to that stage's default, unless the
+	// caller also supplied an explicit probability in the same request.
+	if req.Stage != nil {
+		stage := models.OpportunityStage(*req.Stage)
+		if !validOpportunityStages[stage] {
+			return c.JSON(http.StatusBadRequest, errResponse("invalid stage"))
+		}
+		updates["stage"] = stage
+		if req.Probability == nil {
+			updates["probability"] = stageDefaultProbability(stage)
+		}
+	}
+	if req.Probability != nil {
+		updates["probability"] = clampProbability(*req.Probability)
+	}
+
+	if err := h.DB.Model(&row).Updates(updates).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not update opportunity"))
+	}
+	h.DB.First(&row, "id = ?", id)
+	return c.JSON(http.StatusOK, opportunityJSON(row))
+}
+
+func (h Handler) AdminDeleteOpportunity(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid opportunity id"))
+	}
+	if err := h.DB.Delete(&models.Opportunity{}, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not delete opportunity"))
+	}
+	return c.JSON(http.StatusOK, map[string]string{"message": "opportunity deleted"})
+}
+
+// AdminPipelineForecast summarises the pipeline: open value, weighted forecast,
+// per-stage counts/value, and win rate — the numbers behind the forecast board.
+func (h Handler) AdminPipelineForecast(c echo.Context) error {
+	var rows []models.Opportunity
+	if err := h.DB.Find(&rows).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not load pipeline"))
+	}
+
+	type stageSummary struct {
+		Stage    models.OpportunityStage `json:"stage"`
+		Count    int                     `json:"count"`
+		Value    float64                 `json:"value"`
+		Weighted float64                 `json:"weighted_value"`
+	}
+	order := []models.OpportunityStage{
+		models.StageProspecting, models.StageQualified, models.StageProposal,
+		models.StageNegotiation, models.StageWon, models.StageLost,
+	}
+	byStage := map[models.OpportunityStage]*stageSummary{}
+	for _, s := range order {
+		byStage[s] = &stageSummary{Stage: s}
+	}
+
+	var openValue, weightedForecast, wonValue float64
+	var wonCount, lostCount int
+	for _, o := range rows {
+		s := byStage[o.Stage]
+		if s == nil {
+			continue
+		}
+		s.Count++
+		s.Value += o.DealValue
+		weighted := o.DealValue * float64(o.Probability) / 100.0
+		s.Weighted += weighted
+		switch o.Stage {
+		case models.StageWon:
+			wonValue += o.DealValue
+			wonCount++
+		case models.StageLost:
+			lostCount++
+		default:
+			openValue += o.DealValue
+			weightedForecast += weighted
+		}
+	}
+
+	stages := make([]stageSummary, 0, len(order))
+	for _, s := range order {
+		stages = append(stages, *byStage[s])
+	}
+	winRate := 0.0
+	if wonCount+lostCount > 0 {
+		winRate = float64(wonCount) / float64(wonCount+lostCount) * 100.0
+	}
+
+	return c.JSON(http.StatusOK, map[string]any{
+		"open_value":        openValue,
+		"weighted_forecast": weightedForecast,
+		"won_value":         wonValue,
+		"won_count":         wonCount,
+		"lost_count":        lostCount,
+		"win_rate":          winRate,
+		"total_count":       len(rows),
+		"stages":            stages,
+	})
+}
+
 // --- Capstone progress reports & extension requests ---
 
 // progressReportJSON renders a ProgressReport exactly per the API contract:

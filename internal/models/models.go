@@ -198,6 +198,50 @@ type QuoteRequest struct {
 	AdminNotes string `json:"admin_notes" gorm:"type:text"`
 }
 
+// OpportunityStage is the deal-qualification pipeline stage. The open stages
+// (prospecting → negotiation) count toward the pipeline; won/lost are terminal.
+type OpportunityStage string
+
+const (
+	StageProspecting OpportunityStage = "prospecting"
+	StageQualified   OpportunityStage = "qualified"
+	StageProposal    OpportunityStage = "proposal"
+	StageNegotiation OpportunityStage = "negotiation"
+	StageWon         OpportunityStage = "won"
+	StageLost        OpportunityStage = "lost"
+)
+
+// OpportunityGrade is the account/deal maturity grading (Bronze → Platinum),
+// an axis independent of the pipeline stage.
+type OpportunityGrade string
+
+const (
+	GradeBronze   OpportunityGrade = "bronze"
+	GradeSilver   OpportunityGrade = "silver"
+	GradeGold     OpportunityGrade = "gold"
+	GradePlatinum OpportunityGrade = "platinum"
+)
+
+// Opportunity is a B2B sales deal moving through the qualification pipeline.
+// DealValue × Probability gives the weighted forecast value (computed in the
+// API response, not stored, mirroring the progress-percentage pattern).
+type Opportunity struct {
+	BaseModel
+	Name            string           `json:"name" gorm:"not null"`
+	AccountName     string           `json:"account_name" gorm:"index"`
+	ContactName     string           `json:"contact_name"`
+	ContactEmail    string           `json:"contact_email"`
+	Sector          string           `json:"sector" gorm:"index"`
+	Stage           OpportunityStage `json:"stage" gorm:"type:varchar(40);index;not null;default:'prospecting'"`
+	Grade           OpportunityGrade `json:"grade" gorm:"type:varchar(20);index;not null;default:'bronze'"`
+	DealValue       float64          `json:"deal_value"`
+	Probability     int              `json:"probability"` // 0–100, defaults per stage
+	OwnerID         *uuid.UUID       `json:"owner_id" gorm:"type:uuid;index"`
+	SourceQuoteID   *uuid.UUID       `json:"source_quote_id" gorm:"type:uuid;index"` // lead it converted from
+	ExpectedCloseAt *time.Time       `json:"expected_close_at"`
+	Notes           string           `json:"notes" gorm:"type:text"`
+}
+
 type ChatMessage struct {
 	BaseModel
 	UserID   *uuid.UUID `json:"user_id" gorm:"type:uuid;index"`
