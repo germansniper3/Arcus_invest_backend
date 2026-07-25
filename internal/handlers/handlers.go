@@ -1063,6 +1063,50 @@ var validOpportunityGrades = map[models.OpportunityGrade]bool{
 	models.GradeGold: true, models.GradePlatinum: true,
 }
 
+// validOpportunitySegments whitelists the ABM account-segment values.
+var validOpportunitySegments = map[string]bool{
+	"strategic": true, "growth": true, "standard": true,
+}
+
+// contactRequest is a buying-committee member as sent by the client, embedded in
+// the opportunity create/update payloads.
+type contactRequest struct {
+	Name      string `json:"name"`
+	Role      string `json:"role"`
+	Email     string `json:"email"`
+	Phone     string `json:"phone"`
+	IsPrimary bool   `json:"is_primary"`
+}
+
+// buildContacts converts client contact rows into models, dropping blank names.
+func buildContacts(rows []contactRequest) []models.OpportunityContact {
+	out := make([]models.OpportunityContact, 0, len(rows))
+	for _, r := range rows {
+		if strings.TrimSpace(r.Name) == "" {
+			continue
+		}
+		out = append(out, models.OpportunityContact{
+			Name:      strings.TrimSpace(r.Name),
+			Role:      strings.TrimSpace(r.Role),
+			Email:     strings.TrimSpace(r.Email),
+			Phone:     strings.TrimSpace(r.Phone),
+			IsPrimary: r.IsPrimary,
+		})
+	}
+	return out
+}
+
+func contactsJSON(rows []models.OpportunityContact) []map[string]any {
+	out := make([]map[string]any, 0, len(rows))
+	for _, c := range rows {
+		out = append(out, map[string]any{
+			"id": c.ID, "name": c.Name, "role": c.Role,
+			"email": c.Email, "phone": c.Phone, "is_primary": c.IsPrimary,
+		})
+	}
+	return out
+}
+
 // stageDefaultProbability is the default win-probability seeded when a deal
 // enters a stage (used unless the caller sets an explicit probability).
 func stageDefaultProbability(stage models.OpportunityStage) int {
@@ -1106,6 +1150,7 @@ func opportunityJSON(o models.Opportunity) map[string]any {
 		"contact_name":      o.ContactName,
 		"contact_email":     o.ContactEmail,
 		"sector":            o.Sector,
+		"segment":           o.Segment,
 		"stage":             o.Stage,
 		"grade":             o.Grade,
 		"deal_value":        o.DealValue,
@@ -1115,6 +1160,7 @@ func opportunityJSON(o models.Opportunity) map[string]any {
 		"source_quote_id":   o.SourceQuoteID,
 		"expected_close_at": o.ExpectedCloseAt,
 		"notes":             o.Notes,
+		"contacts":          contactsJSON(o.Contacts),
 	}
 }
 
@@ -1134,7 +1180,7 @@ func (h Handler) AdminListStaff(c echo.Context) error {
 
 func (h Handler) AdminListOpportunities(c echo.Context) error {
 	var rows []models.Opportunity
-	q := h.DB.Order("created_at desc")
+	q := h.DB.Preload("Contacts").Order("created_at desc")
 	if stage := c.QueryParam("stage"); stage != "" {
 		q = q.Where("stage = ?", stage)
 	}
@@ -1154,15 +1200,17 @@ func (h Handler) AdminCreateOpportunity(c echo.Context) error {
 		AccountName     string     `json:"account_name"`
 		ContactName     string     `json:"contact_name"`
 		ContactEmail    string     `json:"contact_email"`
-		Sector          string     `json:"sector"`
-		Stage           string     `json:"stage"`
-		Grade           string     `json:"grade"`
-		DealValue       float64    `json:"deal_value"`
-		Probability     *int       `json:"probability"`
-		OwnerID         *uuid.UUID `json:"owner_id"`
-		SourceQuoteID   *uuid.UUID `json:"source_quote_id"`
-		ExpectedCloseAt *time.Time `json:"expected_close_at"`
-		Notes           string     `json:"notes"`
+		Sector          string           `json:"sector"`
+		Segment         string           `json:"segment"`
+		Stage           string           `json:"stage"`
+		Grade           string           `json:"grade"`
+		DealValue       float64          `json:"deal_value"`
+		Probability     *int             `json:"probability"`
+		OwnerID         *uuid.UUID       `json:"owner_id"`
+		SourceQuoteID   *uuid.UUID       `json:"source_quote_id"`
+		ExpectedCloseAt *time.Time       `json:"expected_close_at"`
+		Notes           string           `json:"notes"`
+		Contacts        []contactRequest `json:"contacts"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, errResponse("invalid request body"))
@@ -1185,6 +1233,13 @@ func (h Handler) AdminCreateOpportunity(c echo.Context) error {
 	if !validOpportunityGrades[grade] {
 		return c.JSON(http.StatusBadRequest, errResponse("invalid grade"))
 	}
+	segment := strings.TrimSpace(req.Segment)
+	if segment == "" {
+		segment = "standard"
+	}
+	if !validOpportunitySegments[segment] {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid segment"))
+	}
 
 	probability := stageDefaultProbability(stage)
 	if req.Probability != nil {
@@ -1197,6 +1252,7 @@ func (h Handler) AdminCreateOpportunity(c echo.Context) error {
 		ContactName:     req.ContactName,
 		ContactEmail:    req.ContactEmail,
 		Sector:          req.Sector,
+		Segment:         segment,
 		Stage:           stage,
 		Grade:           grade,
 		DealValue:       req.DealValue,
@@ -1204,6 +1260,7 @@ func (h Handler) AdminCreateOpportunity(c echo.Context) error {
 		SourceQuoteID:   req.SourceQuoteID,
 		ExpectedCloseAt: req.ExpectedCloseAt,
 		Notes:           req.Notes,
+		Contacts:        buildContacts(req.Contacts),
 	}
 	if req.OwnerID != nil && *req.OwnerID != uuid.Nil {
 		opp.OwnerID = req.OwnerID
@@ -1231,11 +1288,13 @@ func (h Handler) AdminUpdateOpportunity(c echo.Context) error {
 		Sector          *string    `json:"sector"`
 		Stage           *string    `json:"stage"`
 		Grade           *string    `json:"grade"`
-		DealValue       *float64   `json:"deal_value"`
-		Probability     *int       `json:"probability"`
-		OwnerID         *uuid.UUID `json:"owner_id"`
-		ExpectedCloseAt *time.Time `json:"expected_close_at"`
-		Notes           *string    `json:"notes"`
+		DealValue       *float64          `json:"deal_value"`
+		Probability     *int              `json:"probability"`
+		OwnerID         *uuid.UUID        `json:"owner_id"`
+		ExpectedCloseAt *time.Time        `json:"expected_close_at"`
+		Notes           *string           `json:"notes"`
+		Segment         *string           `json:"segment"`
+		Contacts        *[]contactRequest `json:"contacts"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, errResponse("invalid body"))
@@ -1259,6 +1318,16 @@ func (h Handler) AdminUpdateOpportunity(c echo.Context) error {
 	}
 	if req.Sector != nil {
 		updates["sector"] = *req.Sector
+	}
+	if req.Segment != nil {
+		segment := strings.TrimSpace(*req.Segment)
+		if segment == "" {
+			segment = "standard"
+		}
+		if !validOpportunitySegments[segment] {
+			return c.JSON(http.StatusBadRequest, errResponse("invalid segment"))
+		}
+		updates["segment"] = segment
 	}
 	if req.DealValue != nil {
 		updates["deal_value"] = *req.DealValue
@@ -1303,7 +1372,19 @@ func (h Handler) AdminUpdateOpportunity(c echo.Context) error {
 	if err := h.DB.Model(&row).Updates(updates).Error; err != nil {
 		return c.JSON(http.StatusInternalServerError, errResponse("could not update opportunity"))
 	}
-	h.DB.First(&row, "id = ?", id)
+	// If the client sent a contacts array, replace the buying committee wholesale
+	// (the modal always submits the full list).
+	if req.Contacts != nil {
+		h.DB.Where("opportunity_id = ?", id).Delete(&models.OpportunityContact{})
+		fresh := buildContacts(*req.Contacts)
+		for i := range fresh {
+			fresh[i].OpportunityID = id
+		}
+		if len(fresh) > 0 {
+			h.DB.Create(&fresh)
+		}
+	}
+	h.DB.Preload("Contacts").First(&row, "id = ?", id)
 	return c.JSON(http.StatusOK, opportunityJSON(row))
 }
 
@@ -1455,6 +1536,7 @@ func (h Handler) AdminAccountsIndex(c echo.Context) error {
 	type accountAgg struct {
 		Account   string  `json:"account"`
 		Sector    string  `json:"sector"`
+		Segment   string  `json:"segment"`
 		DealCount int     `json:"deal_count"`
 		OpenCount int     `json:"open_count"`
 		OpenValue float64 `json:"open_value"`
@@ -1463,7 +1545,9 @@ func (h Handler) AdminAccountsIndex(c echo.Context) error {
 		Total     float64 `json:"total_value"`
 		TopGrade  string  `json:"top_grade"`
 		topRank   int
+		segRank   int
 	}
+	segmentRank := map[string]int{"strategic": 3, "growth": 2, "standard": 1}
 	type sectorAgg struct {
 		Sector    string  `json:"sector"`
 		Accounts  int     `json:"account_count"`
@@ -1504,6 +1588,12 @@ func (h Handler) AdminAccountsIndex(c echo.Context) error {
 		if r := gradeRank(o.Grade); r > a.topRank {
 			a.topRank = r
 			a.TopGrade = string(o.Grade)
+		}
+		if seg := strings.TrimSpace(o.Segment); seg != "" {
+			if r := segmentRank[seg]; r > a.segRank {
+				a.segRank = r
+				a.Segment = seg
+			}
 		}
 
 		s := sectors[sectorKey]

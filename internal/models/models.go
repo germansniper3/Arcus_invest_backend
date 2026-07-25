@@ -227,19 +227,33 @@ const (
 // API response, not stored, mirroring the progress-percentage pattern).
 type Opportunity struct {
 	BaseModel
-	Name            string           `json:"name" gorm:"not null"`
-	AccountName     string           `json:"account_name" gorm:"index"`
-	ContactName     string           `json:"contact_name"`
-	ContactEmail    string           `json:"contact_email"`
-	Sector          string           `json:"sector" gorm:"index"`
-	Stage           OpportunityStage `json:"stage" gorm:"type:varchar(40);index;not null;default:'prospecting'"`
-	Grade           OpportunityGrade `json:"grade" gorm:"type:varchar(20);index;not null;default:'bronze'"`
-	DealValue       float64          `json:"deal_value"`
-	Probability     int              `json:"probability"` // 0–100, defaults per stage
-	OwnerID         *uuid.UUID       `json:"owner_id" gorm:"type:uuid;index"`
-	SourceQuoteID   *uuid.UUID       `json:"source_quote_id" gorm:"type:uuid;index"` // lead it converted from
-	ExpectedCloseAt *time.Time       `json:"expected_close_at"`
-	Notes           string           `json:"notes" gorm:"type:text"`
+	Name            string               `json:"name" gorm:"not null"`
+	AccountName     string               `json:"account_name" gorm:"index"`
+	ContactName     string               `json:"contact_name"`
+	ContactEmail    string               `json:"contact_email"`
+	Sector          string               `json:"sector" gorm:"index"`
+	Segment         string               `json:"segment" gorm:"index;default:'standard'"` // strategic, growth, standard
+	Stage           OpportunityStage     `json:"stage" gorm:"type:varchar(40);index;not null;default:'prospecting'"`
+	Grade           OpportunityGrade     `json:"grade" gorm:"type:varchar(20);index;not null;default:'bronze'"`
+	DealValue       float64              `json:"deal_value"`
+	Probability     int                  `json:"probability"` // 0–100, defaults per stage
+	OwnerID         *uuid.UUID           `json:"owner_id" gorm:"type:uuid;index"`
+	SourceQuoteID   *uuid.UUID           `json:"source_quote_id" gorm:"type:uuid;index"` // lead it converted from
+	ExpectedCloseAt *time.Time           `json:"expected_close_at"`
+	Notes           string               `json:"notes" gorm:"type:text"`
+	Contacts        []OpportunityContact `json:"contacts" gorm:"foreignKey:OpportunityID;constraint:OnDelete:CASCADE"`
+}
+
+// OpportunityContact is a member of the account's buying committee for a deal
+// (decision maker, champion, influencer, …).
+type OpportunityContact struct {
+	BaseModel
+	OpportunityID uuid.UUID `json:"opportunity_id" gorm:"type:uuid;index;not null"`
+	Name          string    `json:"name" gorm:"not null"`
+	Role          string    `json:"role"` // decision_maker, champion, influencer, technical, procurement, other
+	Email         string    `json:"email"`
+	Phone         string    `json:"phone"`
+	IsPrimary     bool      `json:"is_primary"`
 }
 
 type ChatMessage struct {

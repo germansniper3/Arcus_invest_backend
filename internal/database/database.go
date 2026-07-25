@@ -33,5 +33,6 @@ func Migrate(db *gorm.DB) error {
 		&models.Broadcast{},
 		&models.Submission{},
 		&models.Opportunity{},
+		&models.OpportunityContact{},
 	)
 }
