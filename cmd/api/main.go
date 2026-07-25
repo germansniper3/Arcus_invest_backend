@@ -85,6 +85,7 @@ func main() {
 
 	// Public products
 	api.GET("/products", h.ListPublicProducts)
+	api.GET("/products/images/:name", h.ServeProductImage)
 	api.GET("/products/:slug", h.GetPublicProduct)
 
 	// Invitation claim (public — unauthenticated student sets password)
@@ -147,6 +148,7 @@ func main() {
 	// Products
 	admin.GET("/products", h.AdminListProducts)
 	admin.POST("/products", h.AdminCreateProduct)
+	admin.POST("/products/image", h.UploadProductImage)
 	admin.PUT("/products/:id", h.AdminUpdateProduct)
 	admin.DELETE("/products/:id", h.AdminDeleteProduct)
 

@@ -965,6 +965,87 @@ func (h Handler) AdminDeleteProduct(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]string{"message": "product deleted"})
 }
 
+// --- Product images (upload + public serve) ---
+
+// maxProductImageSize caps product image uploads at 5 MB.
+const maxProductImageSize = 5 * 1024 * 1024
+
+// allowedProductImageExts whitelists the image extensions the admin may upload
+// for a product photo.
+var allowedProductImageExts = map[string]bool{
+	".png": true, ".jpg": true, ".jpeg": true, ".webp": true, ".gif": true,
+}
+
+// UploadProductImage accepts a multipart/form-data image from an admin, stores
+// it under an opaque server-generated key, and returns a path (relative to the
+// API base) that ServeProductImage will stream publicly. The returned path is
+// what the admin then saves as the product's image_url.
+func (h Handler) UploadProductImage(c echo.Context) error {
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("an image file is required"))
+	}
+	if fileHeader.Size <= 0 {
+		return c.JSON(http.StatusBadRequest, errResponse("the uploaded image is empty"))
+	}
+	if fileHeader.Size > maxProductImageSize {
+		return c.JSON(http.StatusBadRequest, errResponse("image too large — the maximum size is 5 MB"))
+	}
+
+	ext := strings.ToLower(filepath.Ext(fileHeader.Filename))
+	if !allowedProductImageExts[ext] {
+		return c.JSON(http.StatusBadRequest, errResponse("unsupported image type — allowed: png, jpg, jpeg, webp, gif"))
+	}
+
+	contentType := mime.TypeByExtension(ext)
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+
+	src, err := fileHeader.Open()
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("could not read the uploaded image"))
+	}
+	defer src.Close()
+
+	name := uuid.NewString() + ext
+	key := "product-images/" + name
+	if err := h.Store.Save(key, src, fileHeader.Size, contentType); err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not store the uploaded image"))
+	}
+
+	// Path is relative to the API base ("/api/v1"); the frontend turns it into an
+	// absolute URL before saving it as the product's image_url.
+	return c.JSON(http.StatusCreated, map[string]string{"url": "/products/images/" + name})
+}
+
+// ServeProductImage streams a previously uploaded product image inline. It is a
+// public route (product photos are shown on the public catalogue). The name is
+// a server-generated uuid+ext; anything with path separators or a non-image
+// extension is rejected before it reaches storage.
+func (h Handler) ServeProductImage(c echo.Context) error {
+	name := c.Param("name")
+	if name == "" || strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid image name"))
+	}
+	ext := strings.ToLower(filepath.Ext(name))
+	if !allowedProductImageExts[ext] {
+		return c.JSON(http.StatusNotFound, errResponse("image not found"))
+	}
+	rc, err := h.Store.Open("product-images/" + name)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("image not found"))
+	}
+	defer rc.Close()
+	contentType := mime.TypeByExtension(ext)
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	// Immutable: keys are content-addressed by uuid, so the bytes never change.
+	c.Response().Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	return c.Stream(http.StatusOK, contentType, rc)
+}
+
 // --- Capstone progress reports & extension requests ---
 
 // progressReportJSON renders a ProgressReport exactly per the API contract:
