@@ -159,6 +159,7 @@ func main() {
 	// Opportunities (B2B sales pipeline)
 	admin.GET("/opportunities", h.AdminListOpportunities)
 	admin.GET("/opportunities/forecast", h.AdminPipelineForecast)
+	admin.GET("/accounts", h.AdminAccountsIndex)
 	admin.POST("/opportunities", h.AdminCreateOpportunity)
 	admin.PUT("/opportunities/:id", h.AdminUpdateOpportunity)
 	admin.DELETE("/opportunities/:id", h.AdminDeleteOpportunity)

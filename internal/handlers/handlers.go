@@ -9,6 +9,7 @@ import (
 	"mime"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -1422,6 +1423,127 @@ func (h Handler) AdminPipelineForecast(c echo.Context) error {
 		"win_rate":          winRate,
 		"total_count":       len(rows),
 		"stages":            stages,
+	})
+}
+
+// gradeRank orders maturity grades so the "best" grade per account can be found.
+func gradeRank(g models.OpportunityGrade) int {
+	switch g {
+	case models.GradePlatinum:
+		return 4
+	case models.GradeGold:
+		return 3
+	case models.GradeSilver:
+		return 2
+	case models.GradeBronze:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// AdminAccountsIndex derives, from the opportunity pipeline, a ranked view of
+// accounts and of sectors (Vertical Sales Indexing). Values exclude lost deals;
+// "open" is the live pipeline, "won" is closed-won. Both lists are ranked by
+// total value (open + won) descending.
+func (h Handler) AdminAccountsIndex(c echo.Context) error {
+	var rows []models.Opportunity
+	if err := h.DB.Find(&rows).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not load accounts"))
+	}
+
+	type accountAgg struct {
+		Account   string  `json:"account"`
+		Sector    string  `json:"sector"`
+		DealCount int     `json:"deal_count"`
+		OpenCount int     `json:"open_count"`
+		OpenValue float64 `json:"open_value"`
+		Weighted  float64 `json:"weighted_value"`
+		WonValue  float64 `json:"won_value"`
+		Total     float64 `json:"total_value"`
+		TopGrade  string  `json:"top_grade"`
+		topRank   int
+	}
+	type sectorAgg struct {
+		Sector    string  `json:"sector"`
+		Accounts  int     `json:"account_count"`
+		DealCount int     `json:"deal_count"`
+		OpenValue float64 `json:"open_value"`
+		Weighted  float64 `json:"weighted_value"`
+		WonValue  float64 `json:"won_value"`
+		Total     float64 `json:"total_value"`
+		accounts  map[string]bool
+	}
+
+	accounts := map[string]*accountAgg{}
+	sectors := map[string]*sectorAgg{}
+
+	for _, o := range rows {
+		if o.Stage == models.StageLost {
+			continue // lost deals don't count toward account/sector value
+		}
+		acctKey := strings.TrimSpace(o.AccountName)
+		if acctKey == "" {
+			acctKey = "Unattributed"
+		}
+		sectorKey := strings.TrimSpace(o.Sector)
+		if sectorKey == "" {
+			sectorKey = "Unspecified"
+		}
+		weighted := o.DealValue * float64(o.Probability) / 100.0
+
+		a := accounts[acctKey]
+		if a == nil {
+			a = &accountAgg{Account: acctKey, Sector: sectorKey}
+			accounts[acctKey] = a
+		}
+		if a.Sector == "Unspecified" && sectorKey != "Unspecified" {
+			a.Sector = sectorKey
+		}
+		a.DealCount++
+		if r := gradeRank(o.Grade); r > a.topRank {
+			a.topRank = r
+			a.TopGrade = string(o.Grade)
+		}
+
+		s := sectors[sectorKey]
+		if s == nil {
+			s = &sectorAgg{Sector: sectorKey, accounts: map[string]bool{}}
+			sectors[sectorKey] = s
+		}
+		s.DealCount++
+		s.accounts[acctKey] = true
+
+		if o.Stage == models.StageWon {
+			a.WonValue += o.DealValue
+			s.WonValue += o.DealValue
+		} else {
+			a.OpenCount++
+			a.OpenValue += o.DealValue
+			a.Weighted += weighted
+			s.OpenValue += o.DealValue
+			s.Weighted += weighted
+		}
+	}
+
+	accountList := make([]*accountAgg, 0, len(accounts))
+	for _, a := range accounts {
+		a.Total = a.OpenValue + a.WonValue
+		accountList = append(accountList, a)
+	}
+	sort.Slice(accountList, func(i, j int) bool { return accountList[i].Total > accountList[j].Total })
+
+	sectorList := make([]*sectorAgg, 0, len(sectors))
+	for _, s := range sectors {
+		s.Accounts = len(s.accounts)
+		s.Total = s.OpenValue + s.WonValue
+		sectorList = append(sectorList, s)
+	}
+	sort.Slice(sectorList, func(i, j int) bool { return sectorList[i].Total > sectorList[j].Total })
+
+	return c.JSON(http.StatusOK, map[string]any{
+		"accounts": accountList,
+		"sectors":  sectorList,
 	})
 }
 
