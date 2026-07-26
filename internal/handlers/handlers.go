@@ -2447,6 +2447,126 @@ func (h Handler) AdminReviewSubmission(c echo.Context) error {
 	return c.JSON(http.StatusOK, submissionJSON(submission))
 }
 
+// --- Audit logging ---
+
+func auditLogJSON(a models.AuditLog) map[string]any {
+	return map[string]any{
+		"id":         a.ID,
+		"created_at": a.CreatedAt,
+		"actor_id":   a.ActorID,
+		"actor_name": a.ActorName,
+		"actor_role": a.ActorRole,
+		"action":     a.Action,
+		"entity":     a.Entity,
+		"entity_id":  a.EntityID,
+		"method":     a.Method,
+		"path":       a.Path,
+		"status":     a.Status,
+	}
+}
+
+// auditAction maps an HTTP method (and a few special sub-paths) to a verb.
+func auditAction(method, routePath string) string {
+	switch method {
+	case http.MethodPost:
+		switch {
+		case strings.HasSuffix(routePath, "/convert"):
+			return "convert"
+		case strings.HasSuffix(routePath, "/file"), strings.HasSuffix(routePath, "/image"):
+			return "upload"
+		case strings.HasSuffix(routePath, "/broadcast"):
+			return "broadcast"
+		case strings.HasSuffix(routePath, "/invite"):
+			return "invite"
+		case strings.HasSuffix(routePath, "/activities"):
+			return "log"
+		default:
+			return "create"
+		}
+	case http.MethodPut, http.MethodPatch:
+		if strings.HasSuffix(routePath, "/approve") {
+			return "approve"
+		}
+		return "update"
+	case http.MethodDelete:
+		return "delete"
+	}
+	return "other"
+}
+
+// auditEntity extracts the first path segment after the admin prefix from the
+// matched route pattern (e.g. "/api/v1/admin/opportunities/:id" → "opportunities").
+func auditEntity(routePath string) string {
+	p := strings.TrimPrefix(routePath, "/api/v1/admin/")
+	if i := strings.IndexByte(p, '/'); i >= 0 {
+		p = p[:i]
+	}
+	return p
+}
+
+// AuditMutations is admin-group middleware that records every successful
+// mutating request (POST/PUT/PATCH/DELETE) as an immutable AuditLog row. It runs
+// after the handler so the HTTP status is known, snapshots the acting user, and
+// never fails the request if the audit write itself errors.
+func (h Handler) AuditMutations(next echo.HandlerFunc) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		err := next(c)
+
+		method := c.Request().Method
+		switch method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+			return err
+		}
+		// Only record successful mutations; validation/auth failures are noise.
+		if err != nil || c.Response().Status >= 400 {
+			return err
+		}
+
+		routePath := c.Path()
+		entry := models.AuditLog{
+			Action:   auditAction(method, routePath),
+			Entity:   auditEntity(routePath),
+			EntityID: c.Param("id"),
+			Method:   method,
+			Path:     c.Request().URL.Path,
+			Status:   c.Response().Status,
+		}
+		if idRaw, ok := c.Get("user_id").(string); ok && idRaw != "" {
+			var actor models.User
+			if e := h.DB.First(&actor, "id = ?", idRaw).Error; e == nil {
+				entry.ActorID = &actor.ID
+				entry.ActorName = actor.FullName
+				entry.ActorRole = actor.Role
+			}
+		}
+		if e := h.DB.Create(&entry).Error; e != nil {
+			c.Logger().Errorf("audit log write failed (entity=%s action=%s): %v", entry.Entity, entry.Action, e)
+		}
+		return err
+	}
+}
+
+// AdminListAuditLogs returns the most recent audit entries, newest first,
+// optionally filtered by entity and/or action.
+func (h Handler) AdminListAuditLogs(c echo.Context) error {
+	q := h.DB.Order("created_at desc")
+	if entity := c.QueryParam("entity"); entity != "" {
+		q = q.Where("entity = ?", entity)
+	}
+	if action := c.QueryParam("action"); action != "" {
+		q = q.Where("action = ?", action)
+	}
+	var rows []models.AuditLog
+	if err := q.Limit(250).Find(&rows).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not load audit logs"))
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, auditLogJSON(r))
+	}
+	return c.JSON(http.StatusOK, out)
+}
+
 func errResponse(message string) map[string]string { return map[string]string{"error": message} }
 
 func publicUser(user models.User) map[string]any {

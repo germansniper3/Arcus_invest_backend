@@ -290,6 +290,22 @@ type OpportunityContact struct {
 	IsPrimary     bool      `json:"is_primary"`
 }
 
+// AuditLog is an immutable record of an admin mutation: who did what to which
+// entity, and the HTTP outcome. Written best-effort by audit middleware after a
+// successful mutating request, so the trail never blocks or breaks the action.
+type AuditLog struct {
+	BaseModel
+	ActorID   *uuid.UUID `json:"actor_id" gorm:"type:uuid;index"`
+	ActorName string     `json:"actor_name"` // denormalised snapshot (survives user deletion)
+	ActorRole Role       `json:"actor_role"`
+	Action    string     `json:"action" gorm:"index"` // create, update, delete, convert, upload, ...
+	Entity    string     `json:"entity" gorm:"index"` // opportunities, contracts, quotes, ...
+	EntityID  string     `json:"entity_id" gorm:"index"`
+	Method    string     `json:"method"`
+	Path      string     `json:"path"`
+	Status    int        `json:"status"`
+}
+
 type ChatMessage struct {
 	BaseModel
 	UserID   *uuid.UUID `json:"user_id" gorm:"type:uuid;index"`

@@ -113,9 +113,14 @@ func main() {
 	// ── Admin ────────────────────────────────────────────────────────────────
 	admin := protected.Group("/admin")
 	admin.Use(appmw.RequireRoles(models.RoleSuperAdmin, models.RoleAdmin, models.RoleAdmissions))
+	// Record every successful admin mutation to the immutable audit trail.
+	admin.Use(h.AuditMutations)
 
 	// Dashboard metrics
 	admin.GET("/metrics", h.Metrics)
+
+	// Audit trail (super-admin + admin only)
+	admin.GET("/audit-logs", h.AdminListAuditLogs, appmw.RequireRoles(models.RoleSuperAdmin, models.RoleAdmin))
 
 	// Quotes / contact
 	admin.GET("/quotes", h.ListQuotes)
