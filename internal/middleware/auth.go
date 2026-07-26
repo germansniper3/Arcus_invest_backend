@@ -90,3 +90,20 @@ func RequireRoles(roles ...models.Role) echo.MiddlewareFunc {
 		}
 	}
 }
+
+// RejectStudents is the coarse admin gate. Students never enter /admin — their
+// own routes are in the /student group. All other roles (built-in staff +
+// custom) pass through to the fine-grained RequirePermission middleware.
+//
+// Nearly redundant: RequirePermission denies grantless roles anyway. Kept as
+// defense-in-depth so a custom role with zero grants gets a clean 403 here
+// rather than hitting the permission check on every route.
+func RejectStudents(next echo.HandlerFunc) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		role, _ := c.Get("role").(models.Role)
+		if role == models.RoleStudent {
+			return echo.NewHTTPError(http.StatusForbidden, "insufficient permissions")
+		}
+		return next(c)
+	}
+}

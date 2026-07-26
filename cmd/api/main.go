@@ -1,6 +1,7 @@
 package main
 
 import (
+	"arcusinvest/internal/authz"
 	"arcusinvest/internal/config"
 	"arcusinvest/internal/database"
 	"arcusinvest/internal/handlers"
@@ -41,6 +42,16 @@ func main() {
 	if err := database.Migrate(db); err != nil {
 		log.Fatal(err)
 	}
+	if err := seed.Roles(db); err != nil {
+		log.Fatal(err)
+	}
+	if err := authz.LoadFromDB(db); err != nil {
+		log.Printf("WARN: authz.LoadFromDB failed, using hardcoded fallback: %v", err)
+	}
+	// Background goroutine re-reads grants every 30s for multi-replica
+	// coherence. Sub-30s consistency is not guaranteed across replicas.
+	// See also: numReplicas in railway.json.
+	authz.StartCacheRefresher(db, 30*time.Second)
 	if err := seed.Admin(db, cfg); err != nil {
 		log.Fatal(err)
 	}
@@ -127,8 +138,9 @@ func buildRouter(h handlers.Handler, cfg *config.Config, db *gorm.DB) *echo.Echo
 
 	// ── Admin ────────────────────────────────────────────────────────────────
 	admin := protected.Group("/admin")
-	// Coarse gate: students never reach the admin surface at all.
-	admin.Use(appmw.RequireRoles(models.RoleSuperAdmin, models.RoleAdmin, models.RoleAdmissions))
+	// Coarse gate: students never reach the admin surface at all. All other
+	// roles (built-in staff + custom) pass through to RequirePermission.
+	admin.Use(appmw.RejectStudents)
 	// Fine gate: per-resource permissions, default-deny. This is the single
 	// source of truth (internal/authz) — do NOT add per-route RequireRoles, or
 	// the two will drift.
@@ -213,6 +225,12 @@ func buildRouter(h handlers.Handler, cfg *config.Config, db *gorm.DB) *echo.Echo
 	admin.POST("/users", h.CreateUser)
 	admin.PATCH("/users/:id", h.AdminUpdateUser)
 	admin.DELETE("/users/:id", h.AdminDeleteUser)
+
+	// Role management (authz.ResRoles — restricted to super_admin)
+	admin.GET("/roles", h.ListRoles)
+	admin.POST("/roles", h.CreateRole)
+	admin.PATCH("/roles/:id", h.UpdateRole)
+	admin.DELETE("/roles/:id", h.DeleteRole)
 
 	return e
 }

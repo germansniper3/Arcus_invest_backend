@@ -39,5 +39,7 @@ func Migrate(db *gorm.DB) error {
 		&models.Payment{},
 		&models.Contract{},
 		&models.AuditLog{},
+		&models.CustomRole{},
+		&models.CustomRolePermission{},
 	)
 }

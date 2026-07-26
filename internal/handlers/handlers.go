@@ -10,6 +10,7 @@ import (
 	"mime"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -920,6 +921,25 @@ func (h Handler) Chat(c echo.Context) error {
 
 // --- Admin User Management ---
 
+// roleAssignable reports whether a role slug may be assigned to a user. Any row
+// in custom_roles qualifies; built-in roles also qualify even when the table is
+// empty, so a failed role seed degrades to the shipped roles instead of making
+// every role "invalid" and blocking user administration entirely.
+func (h Handler) roleAssignable(role models.Role) bool {
+	var n int64
+	h.DB.Model(&models.CustomRole{}).Where("name = ?", string(role)).Count(&n)
+	return n > 0 || authz.IsBuiltInRole(role)
+}
+
+func roleHasPrivilegedAccess(role models.Role) bool {
+	for _, res := range []authz.Resource{authz.ResUsers, authz.ResRoles} {
+		if authz.Can(role, res, authz.ActionCreate) || authz.Can(role, res, authz.ActionUpdate) || authz.Can(role, res, authz.ActionDelete) {
+			return true
+		}
+	}
+	return false
+}
+
 func (h Handler) CreateUser(c echo.Context) error {
 	var req struct {
 		Email    string      `json:"email"`
@@ -947,21 +967,20 @@ func (h Handler) CreateUser(c echo.Context) error {
 	if role == "" {
 		role = models.RoleAdmissions
 	}
-	switch role {
-	case models.RoleAdmin, models.RoleAdmissions, models.RoleSuperAdmin:
-		// allowed
-	default:
+	if role == models.RoleStudent {
+		return c.JSON(http.StatusBadRequest, errResponse("student accounts cannot be created directly — use onboarding invitation"))
+	}
+	if !h.roleAssignable(role) {
 		return c.JSON(http.StatusBadRequest, errResponse("invalid role"))
 	}
-	// Only a super admin may mint another super admin.
-	if role == models.RoleSuperAdmin {
-		callerRole, _ := c.Get("role").(models.Role)
-		if callerRole != models.RoleSuperAdmin {
-			return c.JSON(http.StatusForbidden, errResponse("only a super admin can create a super admin"))
-		}
+
+	// Assigning a role that holds write access on users or roles requires super_admin.
+	callerRole, _ := c.Get("role").(models.Role)
+	if roleHasPrivilegedAccess(role) && callerRole != models.RoleSuperAdmin {
+		return c.JSON(http.StatusForbidden, errResponse("only a super admin can create a user with user or role management permissions"))
 	}
-	// Reject duplicate emails with a clean message instead of leaking the raw
-	// DB constraint error.
+
+	// Reject duplicate emails with a clean message instead of leaking the raw DB constraint error.
 	var existing int64
 	h.DB.Model(&models.User{}).Where("email = ?", req.Email).Count(&existing)
 	if existing > 0 {
@@ -1000,8 +1019,8 @@ func (h Handler) AdminListUsers(c echo.Context) error {
 }
 
 // AdminUpdateUser toggles a user's active state or changes their role. Guards:
-// only a super admin may grant or revoke super-admin, and nobody may lock
-// themselves out by deactivating or demoting their own account.
+// only a super admin may grant or revoke super-admin or privileged roles (write on users/roles),
+// and nobody may lock themselves out by deactivating or demoting their own account.
 func (h Handler) AdminUpdateUser(c echo.Context) error {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -1028,25 +1047,22 @@ func (h Handler) AdminUpdateUser(c echo.Context) error {
 		if isSelf && !*req.IsActive {
 			return c.JSON(http.StatusBadRequest, errResponse("you cannot deactivate your own account"))
 		}
-		if !*req.IsActive && target.Role == models.RoleSuperAdmin && callerRole != models.RoleSuperAdmin {
-			return c.JSON(http.StatusForbidden, errResponse("only a super admin can deactivate a super admin"))
+		if !*req.IsActive && roleHasPrivilegedAccess(target.Role) && callerRole != models.RoleSuperAdmin {
+			return c.JSON(http.StatusForbidden, errResponse("only a super admin can deactivate a privileged account"))
 		}
 		updates["is_active"] = *req.IsActive
 	}
 	if req.Role != nil {
 		role := models.Role(*req.Role)
-		switch role {
-		case models.RoleAdmin, models.RoleAdmissions, models.RoleSuperAdmin, models.RoleStudent:
-			// allowed
-		default:
+		if !h.roleAssignable(role) {
 			return c.JSON(http.StatusBadRequest, errResponse("invalid role"))
 		}
 		if isSelf && role != target.Role {
 			return c.JSON(http.StatusBadRequest, errResponse("you cannot change your own role"))
 		}
-		// Granting or revoking super-admin is a super-admin-only action.
-		if (role == models.RoleSuperAdmin || target.Role == models.RoleSuperAdmin) && callerRole != models.RoleSuperAdmin {
-			return c.JSON(http.StatusForbidden, errResponse("only a super admin can change super-admin access"))
+		// Granting or revoking a role with write access on users or roles requires super_admin.
+		if (roleHasPrivilegedAccess(role) || roleHasPrivilegedAccess(target.Role)) && callerRole != models.RoleSuperAdmin {
+			return c.JSON(http.StatusForbidden, errResponse("only a super admin can manage administrative role assignments"))
 		}
 		updates["role"] = role
 	}
@@ -3246,6 +3262,338 @@ func (h Handler) AdminListAuditLogs(c echo.Context) error {
 		out = append(out, auditLogJSON(r))
 	}
 	return c.JSON(http.StatusOK, out)
+}
+
+// --- Role Management Handlers ---
+
+func (h Handler) ListRoles(c echo.Context) error {
+	var roles []models.CustomRole
+	if err := h.DB.Preload("Permissions").Order("is_built_in desc, name asc").Find(&roles).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not load roles"))
+	}
+
+	type roleCount struct {
+		Role  string
+		Count int64
+	}
+	var counts []roleCount
+	h.DB.Model(&models.User{}).Where("deleted_at IS NULL").Select("role, count(*) as count").Group("role").Scan(&counts)
+	userCounts := make(map[string]int64)
+	for _, c := range counts {
+		userCounts[c.Role] = c.Count
+	}
+
+	out := make([]map[string]any, 0, len(roles))
+	for _, r := range roles {
+		perms := make([]map[string]any, 0, len(r.Permissions))
+		for _, p := range r.Permissions {
+			perms = append(perms, map[string]any{
+				"id":         p.ID,
+				"resource":   p.Resource,
+				"can_read":   p.CanRead,
+				"can_create": p.CanCreate,
+				"can_update": p.CanUpdate,
+				"can_delete": p.CanDelete,
+				"scope":      p.Scope,
+			})
+		}
+		out = append(out, map[string]any{
+			"id":          r.ID,
+			"name":        r.Name,
+			"label":       r.Label,
+			"is_built_in": r.IsBuiltIn,
+			"description": r.Description,
+			"permissions": perms,
+			"user_count":  userCounts[r.Name],
+		})
+	}
+	return c.JSON(http.StatusOK, out)
+}
+
+type rolePermissionReq struct {
+	Resource  string `json:"resource"`
+	CanRead   bool   `json:"can_read"`
+	CanCreate bool   `json:"can_create"`
+	CanUpdate bool   `json:"can_update"`
+	CanDelete bool   `json:"can_delete"`
+	Scope     string `json:"scope"`
+}
+
+type createRoleReq struct {
+	Name        string              `json:"name"`
+	Label       string              `json:"label"`
+	Description string              `json:"description"`
+	Permissions []rolePermissionReq `json:"permissions"`
+}
+
+var slugRegex = regexp.MustCompile(`^[a-z0-9_]+$`)
+
+func (h Handler) CreateRole(c echo.Context) error {
+	var req createRoleReq
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid request body"))
+	}
+	req.Name = strings.ToLower(strings.TrimSpace(req.Name))
+	req.Label = strings.TrimSpace(req.Label)
+	req.Description = strings.TrimSpace(req.Description)
+
+	if req.Name == "" || !slugRegex.MatchString(req.Name) {
+		return c.JSON(http.StatusBadRequest, errResponse("role name must contain only lowercase letters, numbers, and underscores"))
+	}
+	if req.Label == "" {
+		return c.JSON(http.StatusBadRequest, errResponse("role label is required"))
+	}
+
+	var existing int64
+	h.DB.Model(&models.CustomRole{}).Where("name = ?", req.Name).Count(&existing)
+	if existing > 0 {
+		return c.JSON(http.StatusConflict, errResponse("a role with that name already exists"))
+	}
+
+	callerRole, _ := c.Get("role").(models.Role)
+
+	// Validate resources, scopes, and anti-amplification rules
+	validResources := make(map[string]bool)
+	for _, res := range authz.AllResources {
+		validResources[string(res)] = true
+	}
+
+	permissionsToCreate := make([]models.CustomRolePermission, 0, len(req.Permissions))
+	seenResources := make(map[string]bool)
+
+	for _, p := range req.Permissions {
+		if !validResources[p.Resource] {
+			return c.JSON(http.StatusBadRequest, errResponse(fmt.Sprintf("invalid resource %q", p.Resource)))
+		}
+		if seenResources[p.Resource] {
+			return c.JSON(http.StatusBadRequest, errResponse(fmt.Sprintf("duplicate permission entry for resource %q", p.Resource)))
+		}
+		seenResources[p.Resource] = true
+
+		if p.Scope != string(authz.ScopeNone) && p.Scope != string(authz.ScopeOwn) && p.Scope != string(authz.ScopeAll) {
+			return c.JSON(http.StatusBadRequest, errResponse(fmt.Sprintf("invalid scope %q for resource %q", p.Scope, p.Resource)))
+		}
+
+		hasAnyAction := p.CanRead || p.CanCreate || p.CanUpdate || p.CanDelete
+		if hasAnyAction && p.Scope == string(authz.ScopeNone) {
+			return c.JSON(http.StatusBadRequest, errResponse(fmt.Sprintf("scope cannot be 'none' when actions are enabled on %s", p.Resource)))
+		}
+		if !hasAnyAction {
+			p.Scope = string(authz.ScopeNone)
+		}
+
+		res := authz.Resource(p.Resource)
+		if p.CanRead && !authz.Can(callerRole, res, authz.ActionRead) {
+			return c.JSON(http.StatusForbidden, errResponse(fmt.Sprintf("cannot grant permission you do not hold: read on %s", p.Resource)))
+		}
+		if p.CanCreate && !authz.Can(callerRole, res, authz.ActionCreate) {
+			return c.JSON(http.StatusForbidden, errResponse(fmt.Sprintf("cannot grant permission you do not hold: create on %s", p.Resource)))
+		}
+		if p.CanUpdate && !authz.Can(callerRole, res, authz.ActionUpdate) {
+			return c.JSON(http.StatusForbidden, errResponse(fmt.Sprintf("cannot grant permission you do not hold: update on %s", p.Resource)))
+		}
+		if p.CanDelete && !authz.Can(callerRole, res, authz.ActionDelete) {
+			return c.JSON(http.StatusForbidden, errResponse(fmt.Sprintf("cannot grant permission you do not hold: delete on %s", p.Resource)))
+		}
+
+		permissionsToCreate = append(permissionsToCreate, models.CustomRolePermission{
+			Resource:  p.Resource,
+			CanRead:   p.CanRead,
+			CanCreate: p.CanCreate,
+			CanUpdate: p.CanUpdate,
+			CanDelete: p.CanDelete,
+			Scope:     p.Scope,
+		})
+	}
+
+	role := models.CustomRole{
+		Name:        req.Name,
+		Label:       req.Label,
+		Description: req.Description,
+		IsBuiltIn:   false,
+	}
+
+	err := h.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&role).Error; err != nil {
+			return err
+		}
+		for i := range permissionsToCreate {
+			permissionsToCreate[i].RoleID = role.ID
+			if err := tx.Create(&permissionsToCreate[i]).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not create role"))
+	}
+
+	authz.RefreshCache(h.DB)
+	role.Permissions = permissionsToCreate
+	return c.JSON(http.StatusCreated, role)
+}
+
+type updateRoleReq struct {
+	Label       *string             `json:"label"`
+	Description *string             `json:"description"`
+	Permissions []rolePermissionReq `json:"permissions"`
+}
+
+func (h Handler) UpdateRole(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid role id"))
+	}
+	var role models.CustomRole
+	if err := h.DB.Preload("Permissions").First(&role, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("role not found"))
+	}
+
+	var req updateRoleReq
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid request body"))
+	}
+
+	// Built-in role GRANTS are immutable, not just super_admin's. seed.Roles()
+	// rewrites them from authz.BuiltInGrants on every boot, so accepting an edit
+	// here would silently revert on the next deploy — and would break the
+	// guarantee that seeded roles match the tested specification. Label and
+	// description remain editable; to vary permissions, create a custom role.
+	if role.IsBuiltIn && req.Permissions != nil {
+		return c.JSON(http.StatusForbidden, errResponse(
+			"built-in role permissions cannot be modified — create a custom role instead"))
+	}
+
+	callerRole, _ := c.Get("role").(models.Role)
+	updates := map[string]any{}
+
+	if req.Label != nil {
+		trimmed := strings.TrimSpace(*req.Label)
+		if trimmed == "" {
+			return c.JSON(http.StatusBadRequest, errResponse("role label cannot be empty"))
+		}
+		updates["label"] = trimmed
+	}
+	if req.Description != nil {
+		updates["description"] = strings.TrimSpace(*req.Description)
+	}
+
+	var newPermissions []models.CustomRolePermission
+	if req.Permissions != nil {
+		validResources := make(map[string]bool)
+		for _, res := range authz.AllResources {
+			validResources[string(res)] = true
+		}
+
+		seenResources := make(map[string]bool)
+		for _, p := range req.Permissions {
+			if !validResources[p.Resource] {
+				return c.JSON(http.StatusBadRequest, errResponse(fmt.Sprintf("invalid resource %q", p.Resource)))
+			}
+			if seenResources[p.Resource] {
+				return c.JSON(http.StatusBadRequest, errResponse(fmt.Sprintf("duplicate permission entry for resource %q", p.Resource)))
+			}
+			seenResources[p.Resource] = true
+
+			if p.Scope != string(authz.ScopeNone) && p.Scope != string(authz.ScopeOwn) && p.Scope != string(authz.ScopeAll) {
+				return c.JSON(http.StatusBadRequest, errResponse(fmt.Sprintf("invalid scope %q for resource %q", p.Scope, p.Resource)))
+			}
+
+			hasAnyAction := p.CanRead || p.CanCreate || p.CanUpdate || p.CanDelete
+			if hasAnyAction && p.Scope == string(authz.ScopeNone) {
+				return c.JSON(http.StatusBadRequest, errResponse(fmt.Sprintf("scope cannot be 'none' when actions are enabled on %s", p.Resource)))
+			}
+			if !hasAnyAction {
+				p.Scope = string(authz.ScopeNone)
+			}
+
+			res := authz.Resource(p.Resource)
+			if p.CanRead && !authz.Can(callerRole, res, authz.ActionRead) {
+				return c.JSON(http.StatusForbidden, errResponse(fmt.Sprintf("cannot grant permission you do not hold: read on %s", p.Resource)))
+			}
+			if p.CanCreate && !authz.Can(callerRole, res, authz.ActionCreate) {
+				return c.JSON(http.StatusForbidden, errResponse(fmt.Sprintf("cannot grant permission you do not hold: create on %s", p.Resource)))
+			}
+			if p.CanUpdate && !authz.Can(callerRole, res, authz.ActionUpdate) {
+				return c.JSON(http.StatusForbidden, errResponse(fmt.Sprintf("cannot grant permission you do not hold: update on %s", p.Resource)))
+			}
+			if p.CanDelete && !authz.Can(callerRole, res, authz.ActionDelete) {
+				return c.JSON(http.StatusForbidden, errResponse(fmt.Sprintf("cannot grant permission you do not hold: delete on %s", p.Resource)))
+			}
+
+			newPermissions = append(newPermissions, models.CustomRolePermission{
+				RoleID:    role.ID,
+				Resource:  p.Resource,
+				CanRead:   p.CanRead,
+				CanCreate: p.CanCreate,
+				CanUpdate: p.CanUpdate,
+				CanDelete: p.CanDelete,
+				Scope:     p.Scope,
+			})
+		}
+	}
+
+	err = h.DB.Transaction(func(tx *gorm.DB) error {
+		if len(updates) > 0 {
+			if err := tx.Model(&role).Updates(updates).Error; err != nil {
+				return err
+			}
+		}
+		if req.Permissions != nil {
+			// Unscoped delete to clear old permissions completely and avoid soft-delete unique index collisions
+			if err := tx.Unscoped().Where("role_id = ?", role.ID).Delete(&models.CustomRolePermission{}).Error; err != nil {
+				return err
+			}
+			for i := range newPermissions {
+				if err := tx.Create(&newPermissions[i]).Error; err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not update role"))
+	}
+
+	authz.RefreshCache(h.DB)
+	h.DB.Preload("Permissions").First(&role, "id = ?", id)
+	return c.JSON(http.StatusOK, role)
+}
+
+func (h Handler) DeleteRole(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid role id"))
+	}
+	var role models.CustomRole
+	if err := h.DB.First(&role, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("role not found"))
+	}
+
+	if role.IsBuiltIn {
+		return c.JSON(http.StatusBadRequest, errResponse("built-in roles cannot be deleted"))
+	}
+
+	var userCount int64
+	h.DB.Model(&models.User{}).Where("role = ? AND deleted_at IS NULL", role.Name).Count(&userCount)
+	if userCount > 0 {
+		return c.JSON(http.StatusConflict, errResponse(fmt.Sprintf("cannot delete role — it is currently assigned to %d active user(s)", userCount)))
+	}
+
+	err = h.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Unscoped().Where("role_id = ?", role.ID).Delete(&models.CustomRolePermission{}).Error; err != nil {
+			return err
+		}
+		return tx.Unscoped().Delete(&role).Error
+	})
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not delete role"))
+	}
+
+	authz.RefreshCache(h.DB)
+	return c.JSON(http.StatusOK, map[string]string{"message": "role deleted"})
 }
 
 func errResponse(message string) map[string]string { return map[string]string{"error": message} }
