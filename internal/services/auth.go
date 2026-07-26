@@ -57,8 +57,11 @@ func GenerateInvitation(db *gorm.DB, enrollmentID uuid.UUID) (*models.Onboarding
 		return nil, err
 	}
 
-	// Delete any existing invitation for this enrollment
-	db.Where("enrollment_id = ?", enrollmentID).Delete(&models.OnboardingInvitation{})
+	// Remove any existing invitation for this enrollment. This MUST be a hard
+	// delete: OnboardingInvitation soft-deletes (BaseModel carries DeletedAt) but
+	// EnrollmentID has a unique index, which soft-deleted rows still occupy — a
+	// plain Delete here would make every re-invite fail on a duplicate key.
+	db.Unscoped().Where("enrollment_id = ?", enrollmentID).Delete(&models.OnboardingInvitation{})
 
 	token := uuid.NewString()
 	invite := models.OnboardingInvitation{
@@ -93,13 +96,24 @@ func ClaimInvitation(db *gorm.DB, token string, password string, capstoneTitle s
 		return nil, err
 	}
 
+	email := strings.ToLower(strings.TrimSpace(enrollment.Email))
+
+	// An account may already exist for this email (a previous claim, or a
+	// soft-deleted user still holding the unique email index). Report that
+	// clearly instead of surfacing a raw duplicate-key error from Postgres.
+	var existing int64
+	db.Unscoped().Model(&models.User{}).Where("lower(email) = ?", email).Count(&existing)
+	if existing > 0 {
+		return nil, errors.New("an account already exists for " + email + " — sign in instead, or ask an administrator to reset the password")
+	}
+
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return nil, err
 	}
 
 	user := models.User{
-		Email:        strings.ToLower(enrollment.Email),
+		Email:        email,
 		FullName:     enrollment.FullName,
 		PasswordHash: string(hash),
 		Role:         models.RoleStudent,
