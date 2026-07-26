@@ -244,6 +244,25 @@ type Opportunity struct {
 	Contacts        []OpportunityContact `json:"contacts" gorm:"foreignKey:OpportunityID;constraint:OnDelete:CASCADE"`
 }
 
+// Contract is a stored agreement, optionally linked to a deal, with renewal
+// tracking. The file bytes live in the storage layer; StoredKey is opaque and
+// never exposed (a contract may exist as metadata before a file is attached).
+type Contract struct {
+	BaseModel
+	OpportunityID *uuid.UUID `json:"opportunity_id" gorm:"type:uuid;index"`
+	AccountName   string     `json:"account_name" gorm:"index"`
+	Title         string     `json:"title" gorm:"not null"`
+	Status        string     `json:"status" gorm:"index;default:'draft'"` // draft, sent, signed, active, expired
+	Value         float64    `json:"value"`
+	StartDate     *time.Time `json:"start_date"`
+	RenewalDate   *time.Time `json:"renewal_date" gorm:"index"`
+	Notes         string     `json:"notes" gorm:"type:text"`
+	FileName      string     `json:"file_name"`
+	StoredKey     string     `json:"-"`
+	ContentType   string     `json:"content_type"`
+	Size          int64      `json:"size"`
+}
+
 // OpportunityContact is a member of the account's buying committee for a deal
 // (decision maker, champion, influencer, …).
 type OpportunityContact struct {

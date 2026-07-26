@@ -1637,6 +1637,253 @@ func (h Handler) AdminAccountsIndex(c echo.Context) error {
 	})
 }
 
+// --- Contracts ---
+
+const maxContractSize = 15 * 1024 * 1024
+
+// allowedContractExts whitelists document types that may be attached to a contract.
+var allowedContractExts = map[string]bool{
+	".pdf": true, ".doc": true, ".docx": true,
+}
+
+var validContractStatuses = map[string]bool{
+	"draft": true, "sent": true, "signed": true, "active": true, "expired": true,
+}
+
+func contractJSON(ct models.Contract) map[string]any {
+	return map[string]any{
+		"id":             ct.ID,
+		"created_at":     ct.CreatedAt,
+		"opportunity_id": ct.OpportunityID,
+		"account_name":   ct.AccountName,
+		"title":          ct.Title,
+		"status":         ct.Status,
+		"value":          ct.Value,
+		"start_date":     ct.StartDate,
+		"renewal_date":   ct.RenewalDate,
+		"notes":          ct.Notes,
+		"file_name":      ct.FileName,
+		"content_type":   ct.ContentType,
+		"size":           ct.Size,
+		"has_file":       ct.StoredKey != "",
+	}
+}
+
+func (h Handler) AdminListContracts(c echo.Context) error {
+	var rows []models.Contract
+	// Nulls-last ordering so contracts with a renewal date surface first.
+	if err := h.DB.Order("renewal_date IS NULL, renewal_date asc, created_at desc").Find(&rows).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not load contracts"))
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for _, ct := range rows {
+		out = append(out, contractJSON(ct))
+	}
+	return c.JSON(http.StatusOK, out)
+}
+
+func (h Handler) AdminCreateContract(c echo.Context) error {
+	var req struct {
+		OpportunityID *uuid.UUID `json:"opportunity_id"`
+		AccountName   string     `json:"account_name"`
+		Title         string     `json:"title"`
+		Status        string     `json:"status"`
+		Value         float64    `json:"value"`
+		StartDate     *time.Time `json:"start_date"`
+		RenewalDate   *time.Time `json:"renewal_date"`
+		Notes         string     `json:"notes"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid request body"))
+	}
+	if strings.TrimSpace(req.Title) == "" {
+		return c.JSON(http.StatusBadRequest, errResponse("contract title is required"))
+	}
+	status := strings.TrimSpace(req.Status)
+	if status == "" {
+		status = "draft"
+	}
+	if !validContractStatuses[status] {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid status"))
+	}
+	ct := models.Contract{
+		AccountName: req.AccountName,
+		Title:       strings.TrimSpace(req.Title),
+		Status:      status,
+		Value:       req.Value,
+		StartDate:   req.StartDate,
+		RenewalDate: req.RenewalDate,
+		Notes:       req.Notes,
+	}
+	if req.OpportunityID != nil && *req.OpportunityID != uuid.Nil {
+		ct.OpportunityID = req.OpportunityID
+	}
+	if err := h.DB.Create(&ct).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not create contract"))
+	}
+	return c.JSON(http.StatusCreated, contractJSON(ct))
+}
+
+func (h Handler) AdminUpdateContract(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid contract id"))
+	}
+	var row models.Contract
+	if err := h.DB.First(&row, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("contract not found"))
+	}
+	var req struct {
+		OpportunityID *uuid.UUID `json:"opportunity_id"`
+		AccountName   *string    `json:"account_name"`
+		Title         *string    `json:"title"`
+		Status        *string    `json:"status"`
+		Value         *float64   `json:"value"`
+		StartDate     *time.Time `json:"start_date"`
+		RenewalDate   *time.Time `json:"renewal_date"`
+		Notes         *string    `json:"notes"`
+		ClearRenewal  bool       `json:"clear_renewal"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid body"))
+	}
+	updates := map[string]any{}
+	if req.Title != nil {
+		if strings.TrimSpace(*req.Title) == "" {
+			return c.JSON(http.StatusBadRequest, errResponse("contract title cannot be empty"))
+		}
+		updates["title"] = strings.TrimSpace(*req.Title)
+	}
+	if req.AccountName != nil {
+		updates["account_name"] = *req.AccountName
+	}
+	if req.OpportunityID != nil {
+		if *req.OpportunityID == uuid.Nil {
+			updates["opportunity_id"] = nil
+		} else {
+			updates["opportunity_id"] = *req.OpportunityID
+		}
+	}
+	if req.Status != nil {
+		if !validContractStatuses[*req.Status] {
+			return c.JSON(http.StatusBadRequest, errResponse("invalid status"))
+		}
+		updates["status"] = *req.Status
+	}
+	if req.Value != nil {
+		updates["value"] = *req.Value
+	}
+	if req.StartDate != nil {
+		updates["start_date"] = *req.StartDate
+	}
+	if req.ClearRenewal {
+		updates["renewal_date"] = nil
+	} else if req.RenewalDate != nil {
+		updates["renewal_date"] = *req.RenewalDate
+	}
+	if req.Notes != nil {
+		updates["notes"] = *req.Notes
+	}
+	if err := h.DB.Model(&row).Updates(updates).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not update contract"))
+	}
+	h.DB.First(&row, "id = ?", id)
+	return c.JSON(http.StatusOK, contractJSON(row))
+}
+
+func (h Handler) AdminDeleteContract(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid contract id"))
+	}
+	if err := h.DB.Delete(&models.Contract{}, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not delete contract"))
+	}
+	return c.JSON(http.StatusOK, map[string]string{"message": "contract deleted"})
+}
+
+// UploadContractFile attaches (or replaces) the stored document for a contract.
+func (h Handler) UploadContractFile(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid contract id"))
+	}
+	var ct models.Contract
+	if err := h.DB.First(&ct, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("contract not found"))
+	}
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("a file is required"))
+	}
+	if fileHeader.Size <= 0 {
+		return c.JSON(http.StatusBadRequest, errResponse("the uploaded file is empty"))
+	}
+	if fileHeader.Size > maxContractSize {
+		return c.JSON(http.StatusBadRequest, errResponse("file too large — the maximum upload size is 15 MB"))
+	}
+	ext := strings.ToLower(filepath.Ext(fileHeader.Filename))
+	if !allowedContractExts[ext] {
+		return c.JSON(http.StatusBadRequest, errResponse("unsupported file type — allowed: pdf, doc, docx"))
+	}
+	contentType := mime.TypeByExtension(ext)
+	if contentType == "" {
+		contentType = fileHeader.Header.Get("Content-Type")
+	}
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	src, err := fileHeader.Open()
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("could not read the uploaded file"))
+	}
+	defer src.Close()
+
+	key := "contracts/" + uuid.NewString() + ext
+	if err := h.Store.Save(key, src, fileHeader.Size, contentType); err != nil {
+		c.Logger().Errorf("contract storage failed (driver=%s dir=%s key=%s): %v", h.Cfg.StorageDriver, h.Cfg.StorageDir, key, err)
+		return c.JSON(http.StatusInternalServerError, errResponse("could not store the uploaded file"))
+	}
+	if err := h.DB.Model(&ct).Updates(map[string]any{
+		"file_name": filepath.Base(fileHeader.Filename), "stored_key": key,
+		"content_type": contentType, "size": fileHeader.Size,
+	}).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not save the contract file"))
+	}
+	h.DB.First(&ct, "id = ?", id)
+	return c.JSON(http.StatusOK, contractJSON(ct))
+}
+
+// AdminDownloadContract streams a contract's stored document as an attachment.
+func (h Handler) AdminDownloadContract(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid contract id"))
+	}
+	var ct models.Contract
+	if err := h.DB.First(&ct, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("contract not found"))
+	}
+	if ct.StoredKey == "" {
+		return c.JSON(http.StatusNotFound, errResponse("this contract has no file attached"))
+	}
+	rc, err := h.Store.Open(ct.StoredKey)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("contract file not found"))
+	}
+	defer rc.Close()
+	contentType := ct.ContentType
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	filename := ct.FileName
+	if filename == "" {
+		filename = "contract"
+	}
+	c.Response().Header().Set(echo.HeaderContentDisposition, fmt.Sprintf("attachment; filename=%q", filename))
+	return c.Stream(http.StatusOK, contentType, rc)
+}
+
 // --- Capstone progress reports & extension requests ---
 
 // progressReportJSON renders a ProgressReport exactly per the API contract:
