@@ -73,6 +73,61 @@ func (h Handler) CreateEnrollment(c echo.Context) error {
 	return c.JSON(http.StatusCreated, req)
 }
 
+// AdminCreateEnrollment lets an admin start an onboarding directly, without
+// waiting for a public enrollment submission. Unlike the public endpoint it may
+// set the tier and notes up front, and it rejects an email that already has an
+// enrollment so duplicates don't accumulate.
+func (h Handler) AdminCreateEnrollment(c echo.Context) error {
+	var req struct {
+		FullName string `json:"full_name"`
+		Email    string `json:"email"`
+		Phone    string `json:"phone"`
+		Location string `json:"location"`
+		Tier     string `json:"tier"`
+		About    string `json:"about"`
+		Notes    string `json:"notes"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid request body"))
+	}
+	req.FullName = strings.TrimSpace(req.FullName)
+	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
+	if req.FullName == "" {
+		return c.JSON(http.StatusBadRequest, errResponse("full name is required"))
+	}
+	if req.Email == "" || !strings.Contains(req.Email, "@") {
+		return c.JSON(http.StatusBadRequest, errResponse("a valid email is required"))
+	}
+
+	var existing int64
+	h.DB.Model(&models.Enrollment{}).Where("LOWER(email) = ?", req.Email).Count(&existing)
+	if existing > 0 {
+		return c.JSON(http.StatusConflict, errResponse("an enrollment already exists for that email — invite from the existing record instead"))
+	}
+	// A student account for this email means onboarding is already done; the
+	// claim step would fail later, so say so now.
+	var existingUser int64
+	h.DB.Unscoped().Model(&models.User{}).Where("LOWER(email) = ?", req.Email).Count(&existingUser)
+	if existingUser > 0 {
+		return c.JSON(http.StatusConflict, errResponse("a user account already exists for that email — delete it in Users first, or use a different email"))
+	}
+
+	enrollment := models.Enrollment{
+		FullName: req.FullName,
+		Email:    req.Email,
+		Phone:    strings.TrimSpace(req.Phone),
+		Location: strings.TrimSpace(req.Location),
+		Tier:     strings.TrimSpace(req.Tier),
+		About:    strings.TrimSpace(req.About),
+		Notes:    strings.TrimSpace(req.Notes),
+		Status:   models.StatusSubmitted,
+	}
+	if err := h.DB.Create(&enrollment).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not create enrollment"))
+	}
+	return c.JSON(http.StatusCreated, enrollment)
+}
+
 func (h Handler) ListEnrollments(c echo.Context) error {
 	var rows []models.Enrollment
 	query := h.DB.Order("created_at desc")
@@ -128,9 +183,71 @@ func (h Handler) GenerateInvite(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, errResponse(err.Error()))
 	}
 	claimURL := fmt.Sprintf("%s/claim-invitation?token=%s", strings.TrimRight(h.Cfg.FrontendURL, "/"), invite.Token)
+
+	// Email the link when SMTP is available. This is best-effort: the claim URL is
+	// always returned so the admin can still share it manually if delivery fails.
+	emailed := false
+	emailError := ""
+	if h.Cfg.SMTPConfigured() {
+		var enrollment models.Enrollment
+		h.DB.First(&enrollment, "id = ?", invite.EnrollmentID)
+		if err := services.SendInvitationEmail(h.Cfg, invite.Email, enrollment.FullName, enrollment.Tier, claimURL, invite.ExpiresAt); err != nil {
+			emailError = err.Error()
+			c.Logger().Errorf("invitation email to %s failed: %v", invite.Email, err)
+		} else {
+			emailed = true
+		}
+	} else {
+		emailError = "SMTP is not configured"
+	}
+
 	return c.JSON(http.StatusCreated, map[string]any{
-		"invitation": invite,
-		"claim_url":  claimURL,
+		"invitation":  invite,
+		"claim_url":   claimURL,
+		"emailed":     emailed,
+		"email_error": emailError,
+	})
+}
+
+// AdminEmailStatus reports whether outbound email is usable, without exposing
+// the password. Diagnostic only — it does not attempt delivery.
+func (h Handler) AdminEmailStatus(c echo.Context) error {
+	advice := services.SMTPAdvice(h.Cfg)
+	return c.JSON(http.StatusOK, map[string]any{
+		"configured":    h.Cfg.SMTPConfigured(),
+		"host":          h.Cfg.SMTPHost,
+		"port":          h.Cfg.SMTPPort,
+		"from":          h.Cfg.SMTPFrom,
+		"has_username":  h.Cfg.SMTPUsername != "",
+		"has_password":  h.Cfg.SMTPPassword != "",
+		"frontend_url":  h.Cfg.FrontendURL,
+		"issues":        advice,
+		"looks_healthy": h.Cfg.SMTPConfigured() && len(advice) == 0,
+	})
+}
+
+// AdminSendTestEmail sends a diagnostic email to the requesting admin's OWN
+// address, so SMTP can be proven without emailing students.
+func (h Handler) AdminSendTestEmail(c echo.Context) error {
+	if !h.Cfg.SMTPConfigured() {
+		return c.JSON(http.StatusBadRequest, map[string]any{
+			"error":  "SMTP is not configured — set SMTP_HOST, SMTP_PORT and SMTP_FROM",
+			"issues": services.SMTPAdvice(h.Cfg),
+		})
+	}
+	var actor models.User
+	if err := h.DB.First(&actor, "id = ?", c.Get("user_id")).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("could not resolve your account"))
+	}
+	if err := services.SendTestEmail(h.Cfg, actor.Email); err != nil {
+		c.Logger().Errorf("SMTP test to %s failed: %v", actor.Email, err)
+		return c.JSON(http.StatusBadGateway, map[string]any{
+			"error":  "send failed: " + err.Error(),
+			"issues": services.SMTPAdvice(h.Cfg),
+		})
+	}
+	return c.JSON(http.StatusOK, map[string]any{
+		"message": "test email sent to " + actor.Email,
 	})
 }
 
@@ -846,6 +963,141 @@ func (h Handler) CreateUser(c echo.Context) error {
 		return c.JSON(http.StatusConflict, errResponse("could not create user"))
 	}
 	return c.JSON(http.StatusCreated, publicUser(user))
+}
+
+// AdminListUsers returns every account with its role and activity state, so
+// admins can see exactly who exists (including leftover test accounts).
+func (h Handler) AdminListUsers(c echo.Context) error {
+	var users []models.User
+	q := h.DB.Preload("StudentProfile").Order("created_at desc")
+	if role := c.QueryParam("role"); role != "" {
+		q = q.Where("role = ?", role)
+	}
+	if err := q.Find(&users).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not load users"))
+	}
+	out := make([]map[string]any, 0, len(users))
+	for _, u := range users {
+		row := publicUser(u)
+		row["created_at"] = u.CreatedAt
+		row["last_login_at"] = u.LastLoginAt
+		out = append(out, row)
+	}
+	return c.JSON(http.StatusOK, out)
+}
+
+// AdminUpdateUser toggles a user's active state or changes their role. Guards:
+// only a super admin may grant or revoke super-admin, and nobody may lock
+// themselves out by deactivating or demoting their own account.
+func (h Handler) AdminUpdateUser(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid user id"))
+	}
+	var target models.User
+	if err := h.DB.First(&target, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("user not found"))
+	}
+	var req struct {
+		IsActive *bool   `json:"is_active"`
+		Role     *string `json:"role"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid body"))
+	}
+
+	callerRole, _ := c.Get("role").(models.Role)
+	callerID, _ := c.Get("user_id").(string)
+	isSelf := callerID == target.ID.String()
+
+	updates := map[string]any{}
+	if req.IsActive != nil {
+		if isSelf && !*req.IsActive {
+			return c.JSON(http.StatusBadRequest, errResponse("you cannot deactivate your own account"))
+		}
+		if !*req.IsActive && target.Role == models.RoleSuperAdmin && callerRole != models.RoleSuperAdmin {
+			return c.JSON(http.StatusForbidden, errResponse("only a super admin can deactivate a super admin"))
+		}
+		updates["is_active"] = *req.IsActive
+	}
+	if req.Role != nil {
+		role := models.Role(*req.Role)
+		switch role {
+		case models.RoleAdmin, models.RoleAdmissions, models.RoleSuperAdmin, models.RoleStudent:
+			// allowed
+		default:
+			return c.JSON(http.StatusBadRequest, errResponse("invalid role"))
+		}
+		if isSelf && role != target.Role {
+			return c.JSON(http.StatusBadRequest, errResponse("you cannot change your own role"))
+		}
+		// Granting or revoking super-admin is a super-admin-only action.
+		if (role == models.RoleSuperAdmin || target.Role == models.RoleSuperAdmin) && callerRole != models.RoleSuperAdmin {
+			return c.JSON(http.StatusForbidden, errResponse("only a super admin can change super-admin access"))
+		}
+		updates["role"] = role
+	}
+	if len(updates) == 0 {
+		return c.JSON(http.StatusBadRequest, errResponse("nothing to update"))
+	}
+	if err := h.DB.Model(&target).Updates(updates).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not update user"))
+	}
+	h.DB.Preload("StudentProfile").First(&target, "id = ?", id)
+	return c.JSON(http.StatusOK, publicUser(target))
+}
+
+// AdminDeleteUser permanently removes an account. This is a HARD delete on
+// purpose: User.Email carries a unique index that a soft-deleted row would keep
+// occupying, which would block ever re-onboarding that email. For a student it
+// also clears the profile and detaches the enrollment so it can be re-invited.
+func (h Handler) AdminDeleteUser(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid user id"))
+	}
+	var target models.User
+	if err := h.DB.Preload("StudentProfile").First(&target, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("user not found"))
+	}
+	if callerID, _ := c.Get("user_id").(string); callerID == target.ID.String() {
+		return c.JSON(http.StatusBadRequest, errResponse("you cannot delete your own account"))
+	}
+	callerRole, _ := c.Get("role").(models.Role)
+	if target.Role == models.RoleSuperAdmin && callerRole != models.RoleSuperAdmin {
+		return c.JSON(http.StatusForbidden, errResponse("only a super admin can delete a super admin"))
+	}
+
+	err = h.DB.Transaction(func(tx *gorm.DB) error {
+		if target.StudentProfile != nil {
+			profileID := target.StudentProfile.ID
+			// Clear capstone artefacts belonging to this profile.
+			tx.Unscoped().Where("student_profile_id = ?", profileID).Delete(&models.CapstoneMilestone{})
+			tx.Unscoped().Where("student_profile_id = ?", profileID).Delete(&models.CapstoneComment{})
+			tx.Unscoped().Where("student_profile_id = ?", profileID).Delete(&models.ProgressReport{})
+			tx.Unscoped().Where("student_profile_id = ?", profileID).Delete(&models.ExtensionRequest{})
+			tx.Unscoped().Where("student_profile_id = ?", profileID).Delete(&models.Submission{})
+			if err := tx.Unscoped().Delete(&models.StudentProfile{}, "id = ?", profileID).Error; err != nil {
+				return err
+			}
+		}
+		// Detach the enrollment and reopen it, and drop any invitation, so the
+		// same person can be onboarded again.
+		var enrollments []models.Enrollment
+		tx.Where("student_user_id = ?", target.ID).Find(&enrollments)
+		for _, e := range enrollments {
+			tx.Model(&models.Enrollment{}).Where("id = ?", e.ID).Updates(map[string]any{
+				"student_user_id": nil, "status": models.StatusSubmitted,
+			})
+			tx.Unscoped().Where("enrollment_id = ?", e.ID).Delete(&models.OnboardingInvitation{})
+		}
+		return tx.Unscoped().Delete(&models.User{}, "id = ?", target.ID).Error
+	})
+	if err != nil {
+		c.Logger().Errorf("delete user %s failed: %v", target.ID, err)
+		return c.JSON(http.StatusInternalServerError, errResponse("could not delete user"))
+	}
+	return c.JSON(http.StatusOK, map[string]string{"message": "user deleted"})
 }
 
 func (h Handler) Metrics(c echo.Context) error {

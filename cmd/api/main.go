@@ -132,8 +132,13 @@ func main() {
 
 	// Enrollments
 	admin.GET("/enrollments", h.ListEnrollments)
+	admin.POST("/enrollments", h.AdminCreateEnrollment)
 	admin.PATCH("/enrollments/:id", h.UpdateEnrollment)
 	admin.POST("/enrollments/:id/invite", h.GenerateInvite)
+
+	// Outbound email diagnostics (super-admin + admin only)
+	admin.GET("/email/status", h.AdminEmailStatus, appmw.RequireRoles(models.RoleSuperAdmin, models.RoleAdmin))
+	admin.POST("/email/test", h.AdminSendTestEmail, appmw.RequireRoles(models.RoleSuperAdmin, models.RoleAdmin))
 
 	// Students (hub portal — admin-only visibility)
 	admin.GET("/students", h.ListStudents)
@@ -184,7 +189,11 @@ func main() {
 	admin.DELETE("/payments/:id", h.AdminDeletePayment)
 
 	// User management (super-admin + admin only)
-	admin.POST("/users", h.CreateUser, appmw.RequireRoles(models.RoleSuperAdmin, models.RoleAdmin))
+	users := admin.Group("/users", appmw.RequireRoles(models.RoleSuperAdmin, models.RoleAdmin))
+	users.GET("", h.AdminListUsers)
+	users.POST("", h.CreateUser)
+	users.PATCH("/:id", h.AdminUpdateUser)
+	users.DELETE("/:id", h.AdminDeleteUser)
 
 	listener, err := net.Listen("tcp4", "0.0.0.0:"+cfg.Port)
 	if err != nil {
