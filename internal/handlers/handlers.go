@@ -1107,6 +1107,56 @@ func contactsJSON(rows []models.OpportunityContact) []map[string]any {
 	return out
 }
 
+// lineItemRequest is a priced line as sent by the client, embedded in the
+// opportunity create/update payloads.
+type lineItemRequest struct {
+	Description string  `json:"description"`
+	Quantity    float64 `json:"quantity"`
+	UnitPrice   float64 `json:"unit_price"`
+}
+
+// buildLineItems converts client line rows into models, dropping blank
+// descriptions and defaulting a missing quantity to 1. Position preserves order.
+func buildLineItems(rows []lineItemRequest) []models.OpportunityLineItem {
+	out := make([]models.OpportunityLineItem, 0, len(rows))
+	for _, r := range rows {
+		if strings.TrimSpace(r.Description) == "" {
+			continue
+		}
+		qty := r.Quantity
+		if qty == 0 {
+			qty = 1
+		}
+		out = append(out, models.OpportunityLineItem{
+			Description: strings.TrimSpace(r.Description),
+			Quantity:    qty,
+			UnitPrice:   r.UnitPrice,
+			Position:    len(out),
+		})
+	}
+	return out
+}
+
+func lineItemsJSON(rows []models.OpportunityLineItem) []map[string]any {
+	out := make([]map[string]any, 0, len(rows))
+	for _, li := range rows {
+		out = append(out, map[string]any{
+			"id": li.ID, "description": li.Description, "quantity": li.Quantity,
+			"unit_price": li.UnitPrice, "line_total": li.Quantity * li.UnitPrice,
+			"position": li.Position,
+		})
+	}
+	return out
+}
+
+func lineItemsTotal(rows []models.OpportunityLineItem) float64 {
+	var total float64
+	for _, li := range rows {
+		total += li.Quantity * li.UnitPrice
+	}
+	return total
+}
+
 // stageDefaultProbability is the default win-probability seeded when a deal
 // enters a stage (used unless the caller sets an explicit probability).
 func stageDefaultProbability(stage models.OpportunityStage) int {
@@ -1161,6 +1211,8 @@ func opportunityJSON(o models.Opportunity) map[string]any {
 		"expected_close_at": o.ExpectedCloseAt,
 		"notes":             o.Notes,
 		"contacts":          contactsJSON(o.Contacts),
+		"line_items":        lineItemsJSON(o.LineItems),
+		"line_items_total":  lineItemsTotal(o.LineItems),
 	}
 }
 
@@ -1180,7 +1232,7 @@ func (h Handler) AdminListStaff(c echo.Context) error {
 
 func (h Handler) AdminListOpportunities(c echo.Context) error {
 	var rows []models.Opportunity
-	q := h.DB.Preload("Contacts").Order("created_at desc")
+	q := h.DB.Preload("Contacts").Preload("LineItems").Order("created_at desc")
 	if stage := c.QueryParam("stage"); stage != "" {
 		q = q.Where("stage = ?", stage)
 	}
@@ -1208,9 +1260,10 @@ func (h Handler) AdminCreateOpportunity(c echo.Context) error {
 		Probability     *int             `json:"probability"`
 		OwnerID         *uuid.UUID       `json:"owner_id"`
 		SourceQuoteID   *uuid.UUID       `json:"source_quote_id"`
-		ExpectedCloseAt *time.Time       `json:"expected_close_at"`
-		Notes           string           `json:"notes"`
-		Contacts        []contactRequest `json:"contacts"`
+		ExpectedCloseAt *time.Time        `json:"expected_close_at"`
+		Notes           string            `json:"notes"`
+		Contacts        []contactRequest  `json:"contacts"`
+		LineItems       []lineItemRequest `json:"line_items"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, errResponse("invalid request body"))
@@ -1261,6 +1314,7 @@ func (h Handler) AdminCreateOpportunity(c echo.Context) error {
 		ExpectedCloseAt: req.ExpectedCloseAt,
 		Notes:           req.Notes,
 		Contacts:        buildContacts(req.Contacts),
+		LineItems:       buildLineItems(req.LineItems),
 	}
 	if req.OwnerID != nil && *req.OwnerID != uuid.Nil {
 		opp.OwnerID = req.OwnerID
@@ -1293,8 +1347,9 @@ func (h Handler) AdminUpdateOpportunity(c echo.Context) error {
 		OwnerID         *uuid.UUID        `json:"owner_id"`
 		ExpectedCloseAt *time.Time        `json:"expected_close_at"`
 		Notes           *string           `json:"notes"`
-		Segment         *string           `json:"segment"`
-		Contacts        *[]contactRequest `json:"contacts"`
+		Segment         *string            `json:"segment"`
+		Contacts        *[]contactRequest  `json:"contacts"`
+		LineItems       *[]lineItemRequest `json:"line_items"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, errResponse("invalid body"))
@@ -1384,7 +1439,18 @@ func (h Handler) AdminUpdateOpportunity(c echo.Context) error {
 			h.DB.Create(&fresh)
 		}
 	}
-	h.DB.Preload("Contacts").First(&row, "id = ?", id)
+	// Same wholesale replacement for line items when the client sends them.
+	if req.LineItems != nil {
+		h.DB.Where("opportunity_id = ?", id).Delete(&models.OpportunityLineItem{})
+		fresh := buildLineItems(*req.LineItems)
+		for i := range fresh {
+			fresh[i].OpportunityID = id
+		}
+		if len(fresh) > 0 {
+			h.DB.Create(&fresh)
+		}
+	}
+	h.DB.Preload("Contacts").Preload("LineItems").First(&row, "id = ?", id)
 	return c.JSON(http.StatusOK, opportunityJSON(row))
 }
 
@@ -1530,6 +1596,111 @@ func (h Handler) AdminCreateActivity(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, errResponse("could not save activity"))
 	}
 	return c.JSON(http.StatusCreated, activityJSON(activity))
+}
+
+// --- Payments (basis for receipts and invoice balances) ---
+
+var validPaymentMethods = map[string]bool{
+	"cash": true, "bank_transfer": true, "mobile_money": true,
+	"cheque": true, "card": true, "other": true,
+}
+
+func paymentJSON(p models.Payment) map[string]any {
+	return map[string]any{
+		"id":             p.ID,
+		"created_at":     p.CreatedAt,
+		"opportunity_id": p.OpportunityID,
+		"amount":         p.Amount,
+		"method":         p.Method,
+		"reference":      p.Reference,
+		"paid_at":        p.PaidAt,
+		"note":           p.Note,
+		"recorded_by_id": p.RecordedByID,
+		"recorded_by":    p.RecordedBy,
+	}
+}
+
+// AdminListPayments returns the payments recorded against a deal, newest first.
+func (h Handler) AdminListPayments(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid opportunity id"))
+	}
+	var rows []models.Payment
+	if err := h.DB.Where("opportunity_id = ?", id).Order("paid_at desc, created_at desc").Find(&rows).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not load payments"))
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for _, p := range rows {
+		out = append(out, paymentJSON(p))
+	}
+	return c.JSON(http.StatusOK, out)
+}
+
+// AdminCreatePayment records a payment received against a deal (the basis for a
+// receipt). It records only — no funds are processed or transferred.
+func (h Handler) AdminCreatePayment(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid opportunity id"))
+	}
+	var opp models.Opportunity
+	if err := h.DB.First(&opp, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("opportunity not found"))
+	}
+	var req struct {
+		Amount    float64    `json:"amount"`
+		Method    string     `json:"method"`
+		Reference string     `json:"reference"`
+		PaidAt    *time.Time `json:"paid_at"`
+		Note      string     `json:"note"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid request body"))
+	}
+	if req.Amount <= 0 {
+		return c.JSON(http.StatusBadRequest, errResponse("payment amount must be greater than zero"))
+	}
+	method := strings.TrimSpace(req.Method)
+	if method == "" {
+		method = "bank_transfer"
+	}
+	if !validPaymentMethods[method] {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid payment method"))
+	}
+	paidAt := time.Now()
+	if req.PaidAt != nil {
+		paidAt = *req.PaidAt
+	}
+	payment := models.Payment{
+		OpportunityID: id,
+		Amount:        req.Amount,
+		Method:        method,
+		Reference:     strings.TrimSpace(req.Reference),
+		PaidAt:        paidAt,
+		Note:          strings.TrimSpace(req.Note),
+	}
+	var actor models.User
+	if err := h.DB.First(&actor, "id = ?", c.Get("user_id")).Error; err == nil {
+		payment.RecordedByID = &actor.ID
+		payment.RecordedBy = actor.FullName
+	}
+	if err := h.DB.Create(&payment).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not record payment"))
+	}
+	return c.JSON(http.StatusCreated, paymentJSON(payment))
+}
+
+// AdminDeletePayment removes a recorded payment (e.g. an entry error).
+func (h Handler) AdminDeletePayment(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid payment id"))
+	}
+	if err := h.DB.Delete(&models.Payment{}, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not delete payment"))
+	}
+	return c.JSON(http.StatusOK, map[string]string{"message": "payment deleted"})
 }
 
 // AdminPipelineForecast summarises the pipeline: open value, weighted forecast,

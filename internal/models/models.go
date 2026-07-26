@@ -242,6 +242,35 @@ type Opportunity struct {
 	ExpectedCloseAt *time.Time           `json:"expected_close_at"`
 	Notes           string               `json:"notes" gorm:"type:text"`
 	Contacts        []OpportunityContact `json:"contacts" gorm:"foreignKey:OpportunityID;constraint:OnDelete:CASCADE"`
+	LineItems       []OpportunityLineItem `json:"line_items" gorm:"foreignKey:OpportunityID;constraint:OnDelete:CASCADE"`
+}
+
+// OpportunityLineItem is a priced good/service on a deal, used to itemise the
+// generated quotations and invoices. Line total (quantity × unit_price) is
+// computed in the API response, not stored. Embedded in the opportunity
+// create/update payload and replaced wholesale on update, like Contacts.
+type OpportunityLineItem struct {
+	BaseModel
+	OpportunityID uuid.UUID `json:"opportunity_id" gorm:"type:uuid;index;not null"`
+	Description   string    `json:"description" gorm:"not null"`
+	Quantity      float64   `json:"quantity"`
+	UnitPrice     float64   `json:"unit_price"`
+	Position      int       `json:"position"` // display order
+}
+
+// Payment records money received against a deal — the basis for a receipt and
+// for the amount-paid / balance on an invoice. This records payments only; it
+// does not process or transfer funds.
+type Payment struct {
+	BaseModel
+	OpportunityID uuid.UUID  `json:"opportunity_id" gorm:"type:uuid;index;not null"`
+	Amount        float64    `json:"amount"`
+	Method        string     `json:"method"` // cash, bank_transfer, mobile_money, cheque, card, other
+	Reference     string     `json:"reference"`
+	PaidAt        time.Time  `json:"paid_at"`
+	Note          string     `json:"note" gorm:"type:text"`
+	RecordedByID  *uuid.UUID `json:"recorded_by_id" gorm:"type:uuid"`
+	RecordedBy    string     `json:"recorded_by"`
 }
 
 // Contract is a stored agreement, optionally linked to a deal, with renewal
