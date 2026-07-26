@@ -165,6 +165,7 @@ func main() {
 	admin.GET("/opportunities", h.AdminListOpportunities)
 	admin.GET("/opportunities/forecast", h.AdminPipelineForecast)
 	admin.GET("/accounts", h.AdminAccountsIndex)
+	admin.GET("/accounts/:name/recommendations", h.AdminAccountRecommendations)
 
 	// Contracts (repository + renewal tracking)
 	admin.GET("/contracts", h.AdminListContracts)

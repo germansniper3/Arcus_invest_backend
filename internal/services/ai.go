@@ -98,6 +98,93 @@ func Chat(cfg *config.Config, question string) (string, string, error) {
 	return fallbackAnswer(question), "local-knowledge-base", nil
 }
 
+// RecommendationRationales asks the model for a one-sentence sales rationale per
+// candidate product, keyed by product slug. The ranking itself is computed
+// deterministically by the caller — this only supplies the narrative, so an
+// unavailable or malformed AI response degrades to no rationales (never an
+// error). Returns the rationales and the source label for the response.
+func RecommendationRationales(cfg *config.Config, accountContext string, candidates []string) (map[string]string, string) {
+	const localSource = "local-heuristic"
+	if cfg.AIAPIKey == "" || len(candidates) == 0 {
+		return map[string]string{}, localSource
+	}
+
+	model := cfg.AIModel
+	if model == "" {
+		model = "claude-sonnet-5"
+	}
+	baseURL := strings.TrimRight(cfg.AIProviderURL, "/")
+	if baseURL == "" {
+		baseURL = "https://api.anthropic.com"
+	}
+
+	system := "You are a B2B account strategist at Arcus Investments, an engineering firm in Kitwe, Zambia. " +
+		"Given an account's history and a list of candidate products, explain briefly why each product suits that account. " +
+		"Reply with ONLY a JSON object mapping each product slug to a single sentence of at most 25 words. " +
+		"No markdown, no commentary, no extra keys. Do not invent prices, stock levels, or delivery commitments."
+	prompt := fmt.Sprintf("Account context:\n%s\n\nCandidate product slugs:\n%s\n\nReturn the JSON object now.",
+		accountContext, strings.Join(candidates, "\n"))
+
+	body, err := json.Marshal(anthropicRequest{
+		Model:     model,
+		MaxTokens: 700,
+		System:    system,
+		Messages:  []anthropicMessage{{Role: "user", Content: prompt}},
+	})
+	if err != nil {
+		return map[string]string{}, localSource
+	}
+
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/v1/messages", bytes.NewReader(body))
+	if err != nil {
+		return map[string]string{}, localSource
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", cfg.AIAPIKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	client := &http.Client{Timeout: 20 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return map[string]string{}, localSource
+	}
+	defer resp.Body.Close()
+
+	var result anthropicResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || result.Error != nil || len(result.Content) == 0 {
+		return map[string]string{}, localSource
+	}
+
+	// The model is asked for bare JSON, but tolerate it being wrapped in prose
+	// or a fenced block by extracting the outermost object.
+	text := strings.TrimSpace(result.Content[0].Text)
+	start, end := strings.Index(text, "{"), strings.LastIndex(text, "}")
+	if start < 0 || end <= start {
+		return map[string]string{}, localSource
+	}
+	var parsed map[string]string
+	if err := json.Unmarshal([]byte(text[start:end+1]), &parsed); err != nil {
+		return map[string]string{}, localSource
+	}
+
+	// Keep only slugs we actually asked about, so the response cannot introduce
+	// products that are not in the catalogue.
+	allowed := make(map[string]bool, len(candidates))
+	for _, s := range candidates {
+		allowed[s] = true
+	}
+	out := make(map[string]string, len(parsed))
+	for slug, rationale := range parsed {
+		if allowed[slug] && strings.TrimSpace(rationale) != "" {
+			out[slug] = strings.TrimSpace(rationale)
+		}
+	}
+	if len(out) == 0 {
+		return map[string]string{}, localSource
+	}
+	return out, "anthropic:" + model
+}
+
 func fallbackAnswer(question string) string {
 	q := strings.ToLower(question)
 	if strings.Contains(q, "enroll") || strings.Contains(q, "student") || strings.Contains(q, "hub") || strings.Contains(q, "apply") {

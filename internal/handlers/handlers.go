@@ -1248,18 +1248,18 @@ func (h Handler) AdminListOpportunities(c echo.Context) error {
 
 func (h Handler) AdminCreateOpportunity(c echo.Context) error {
 	var req struct {
-		Name            string     `json:"name"`
-		AccountName     string     `json:"account_name"`
-		ContactName     string     `json:"contact_name"`
-		ContactEmail    string     `json:"contact_email"`
-		Sector          string           `json:"sector"`
-		Segment         string           `json:"segment"`
-		Stage           string           `json:"stage"`
-		Grade           string           `json:"grade"`
-		DealValue       float64          `json:"deal_value"`
-		Probability     *int             `json:"probability"`
-		OwnerID         *uuid.UUID       `json:"owner_id"`
-		SourceQuoteID   *uuid.UUID       `json:"source_quote_id"`
+		Name            string            `json:"name"`
+		AccountName     string            `json:"account_name"`
+		ContactName     string            `json:"contact_name"`
+		ContactEmail    string            `json:"contact_email"`
+		Sector          string            `json:"sector"`
+		Segment         string            `json:"segment"`
+		Stage           string            `json:"stage"`
+		Grade           string            `json:"grade"`
+		DealValue       float64           `json:"deal_value"`
+		Probability     *int              `json:"probability"`
+		OwnerID         *uuid.UUID        `json:"owner_id"`
+		SourceQuoteID   *uuid.UUID        `json:"source_quote_id"`
 		ExpectedCloseAt *time.Time        `json:"expected_close_at"`
 		Notes           string            `json:"notes"`
 		Contacts        []contactRequest  `json:"contacts"`
@@ -1335,18 +1335,18 @@ func (h Handler) AdminUpdateOpportunity(c echo.Context) error {
 		return c.JSON(http.StatusNotFound, errResponse("opportunity not found"))
 	}
 	var req struct {
-		Name            *string    `json:"name"`
-		AccountName     *string    `json:"account_name"`
-		ContactName     *string    `json:"contact_name"`
-		ContactEmail    *string    `json:"contact_email"`
-		Sector          *string    `json:"sector"`
-		Stage           *string    `json:"stage"`
-		Grade           *string    `json:"grade"`
-		DealValue       *float64          `json:"deal_value"`
-		Probability     *int              `json:"probability"`
-		OwnerID         *uuid.UUID        `json:"owner_id"`
-		ExpectedCloseAt *time.Time        `json:"expected_close_at"`
-		Notes           *string           `json:"notes"`
+		Name            *string            `json:"name"`
+		AccountName     *string            `json:"account_name"`
+		ContactName     *string            `json:"contact_name"`
+		ContactEmail    *string            `json:"contact_email"`
+		Sector          *string            `json:"sector"`
+		Stage           *string            `json:"stage"`
+		Grade           *string            `json:"grade"`
+		DealValue       *float64           `json:"deal_value"`
+		Probability     *int               `json:"probability"`
+		OwnerID         *uuid.UUID         `json:"owner_id"`
+		ExpectedCloseAt *time.Time         `json:"expected_close_at"`
+		Notes           *string            `json:"notes"`
 		Segment         *string            `json:"segment"`
 		Contacts        *[]contactRequest  `json:"contacts"`
 		LineItems       *[]lineItemRequest `json:"line_items"`
@@ -1898,6 +1898,233 @@ func (h Handler) AdminAccountsIndex(c echo.Context) error {
 		"accounts": accountList,
 		"sectors":  sectorList,
 	})
+}
+
+// --- Cross-sell / upsell recommendations ---
+
+// segmentScore and gradeScore weight an account's strategic standing; a deeper
+// relationship makes any recommendation more likely to land.
+func segmentScore(segment string) int {
+	switch segment {
+	case "strategic":
+		return 20
+	case "growth":
+		return 10
+	default:
+		return 0
+	}
+}
+
+func gradeScore(g models.OpportunityGrade) int {
+	switch g {
+	case models.GradePlatinum:
+		return 15
+	case models.GradeGold:
+		return 10
+	case models.GradeSilver:
+		return 5
+	default:
+		return 0
+	}
+}
+
+// AdminAccountRecommendations ranks catalogue products as cross-sell/upsell
+// candidates for one account. The ranking is a deterministic heuristic over the
+// account's own pipeline (so it works with no AI key configured); the AI service
+// only supplies the per-product rationale text when available.
+func (h Handler) AdminAccountRecommendations(c echo.Context) error {
+	account := strings.TrimSpace(c.Param("name"))
+	if account == "" {
+		return c.JSON(http.StatusBadRequest, errResponse("account name is required"))
+	}
+
+	var deals []models.Opportunity
+	if err := h.DB.Where("LOWER(account_name) = ?", strings.ToLower(account)).Find(&deals).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not load account deals"))
+	}
+	if len(deals) == 0 {
+		return c.JSON(http.StatusNotFound, errResponse("no deals found for this account"))
+	}
+
+	var products []models.Product
+	if err := h.DB.Where("is_published = ?", true).Order("name asc").Find(&products).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not load products"))
+	}
+
+	// Summarise the account: strategic standing, spend, and what it already has.
+	var sector, segment string
+	var topGrade models.OpportunityGrade
+	var topRank int
+	var wonValue, maxWonValue, openValue float64
+	var wonCount int
+	segRank := 0
+	segmentRanks := map[string]int{"strategic": 3, "growth": 2, "standard": 1}
+	owned := map[string]bool{} // lowercased text of deals already won
+	for _, d := range deals {
+		if sector == "" {
+			sector = strings.TrimSpace(d.Sector)
+		}
+		if r := segmentRanks[strings.TrimSpace(d.Segment)]; r > segRank {
+			segRank = r
+			segment = strings.TrimSpace(d.Segment)
+		}
+		if r := gradeRank(d.Grade); r > topRank {
+			topRank = r
+			topGrade = d.Grade
+		}
+		switch d.Stage {
+		case models.StageWon:
+			wonCount++
+			wonValue += d.DealValue
+			if d.DealValue > maxWonValue {
+				maxWonValue = d.DealValue
+			}
+			owned[strings.ToLower(d.Name)] = true
+		case models.StageLost:
+			// lost deals tell us nothing about appetite
+		default:
+			openValue += d.DealValue
+			owned[strings.ToLower(d.Name)] = true // already in play; don't re-pitch
+		}
+	}
+	avgWon := 0.0
+	if wonCount > 0 {
+		avgWon = wonValue / float64(wonCount)
+	}
+
+	type recommendation struct {
+		Slug        string   `json:"slug"`
+		Name        string   `json:"name"`
+		Price       float64  `json:"price"`
+		ImageURL    string   `json:"image_url"`
+		Kind        string   `json:"kind"` // cross_sell or upsell
+		Probability int      `json:"probability"`
+		Rationale   string   `json:"rationale"`
+		Reasons     []string `json:"reasons"`
+	}
+
+	base := 35
+	sectorKey := strings.ToLower(sector)
+	recs := make([]recommendation, 0, len(products))
+	for _, p := range products {
+		// Skip anything this account already owns or is actively negotiating.
+		if owned[strings.ToLower(p.Name)] {
+			continue
+		}
+		score := base
+		reasons := make([]string, 0, 4)
+
+		if s := segmentScore(segment); s > 0 {
+			score += s
+			reasons = append(reasons, segment+" account")
+		}
+		if s := gradeScore(topGrade); s > 0 {
+			score += s
+			reasons = append(reasons, string(topGrade)+" grade relationship")
+		}
+		// Sector affinity: the catalogue text speaks to the account's vertical.
+		if sectorKey != "" {
+			haystack := strings.ToLower(p.Name + " " + p.Description + " " + p.Specs)
+			if strings.Contains(haystack, sectorKey) {
+				score += 15
+				reasons = append(reasons, "matches "+sector+" sector")
+			}
+		}
+		if wonCount > 0 {
+			depth := wonCount * 5
+			if depth > 15 {
+				depth = 15
+			}
+			score += depth
+			reasons = append(reasons, fmt.Sprintf("%d closed deal(s) already", wonCount))
+		}
+		// Affordability relative to prior spend.
+		kind := "cross_sell"
+		if maxWonValue > 0 && p.Price > maxWonValue {
+			kind = "upsell"
+		}
+		if avgWon > 0 {
+			switch {
+			case p.Price <= avgWon:
+				score += 10
+				reasons = append(reasons, "within typical deal size")
+			case p.Price > avgWon*3:
+				score -= 10
+				reasons = append(reasons, "well above typical deal size")
+			}
+		}
+		if p.Stock <= 0 {
+			score -= 10
+			reasons = append(reasons, "out of stock")
+		}
+
+		if score < 5 {
+			score = 5
+		}
+		if score > 95 {
+			score = 95
+		}
+		recs = append(recs, recommendation{
+			Slug: p.Slug, Name: p.Name, Price: p.Price, ImageURL: p.ImageURL,
+			Kind: kind, Probability: score, Reasons: reasons,
+		})
+	}
+
+	sort.Slice(recs, func(i, j int) bool { return recs[i].Probability > recs[j].Probability })
+	if len(recs) > 6 {
+		recs = recs[:6]
+	}
+
+	// Enrich the shortlist with AI rationales; falls back to the heuristic
+	// reasons when no key is configured or the call fails.
+	slugs := make([]string, 0, len(recs))
+	for _, r := range recs {
+		slugs = append(slugs, r.Slug)
+	}
+	accountContext := fmt.Sprintf(
+		"Account: %s\nSector: %s\nSegment: %s\nTop grade: %s\nClosed-won deals: %d (total ZMW %.0f, average ZMW %.0f)\nOpen pipeline: ZMW %.0f\nExisting/in-flight engagements: %s",
+		account, orDash(sector), orDash(segment), orDash(string(topGrade)),
+		wonCount, wonValue, avgWon, openValue, strings.Join(dealNames(deals), "; "),
+	)
+	rationales, source := services.RecommendationRationales(h.Cfg, accountContext, slugs)
+	for i := range recs {
+		if r, ok := rationales[recs[i].Slug]; ok {
+			recs[i].Rationale = r
+		} else if len(recs[i].Reasons) > 0 {
+			recs[i].Rationale = "Suggested because: " + strings.Join(recs[i].Reasons, ", ") + "."
+		}
+	}
+
+	return c.JSON(http.StatusOK, map[string]any{
+		"account":         account,
+		"sector":          sector,
+		"segment":         segment,
+		"top_grade":       topGrade,
+		"won_count":       wonCount,
+		"won_value":       wonValue,
+		"open_value":      openValue,
+		"source":          source,
+		"recommendations": recs,
+	})
+}
+
+func orDash(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "unspecified"
+	}
+	return s
+}
+
+// dealNames lists the account's deal names for the AI context.
+func dealNames(deals []models.Opportunity) []string {
+	out := make([]string, 0, len(deals))
+	for _, d := range deals {
+		if d.Stage == models.StageLost {
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s (%s)", d.Name, d.Stage))
+	}
+	return out
 }
 
 // --- Contracts ---
