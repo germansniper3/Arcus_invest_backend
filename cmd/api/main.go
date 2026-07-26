@@ -15,6 +15,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"golang.org/x/time/rate"
+	"gorm.io/gorm"
 )
 
 // rateLimiter builds a per-IP in-memory rate limiter allowing perMinute
@@ -50,6 +51,21 @@ func main() {
 		log.Fatal(err)
 	}
 
+	h := handlers.Handler{DB: db, Cfg: cfg, Store: store}
+	e := buildRouter(h, cfg, db)
+
+	listener, err := net.Listen("tcp4", "0.0.0.0:"+cfg.Port)
+	if err != nil {
+		log.Fatal(err)
+	}
+	e.Listener = listener
+	log.Fatal(e.Start(""))
+}
+
+// buildRouter registers every route. It is separate from main so tests can walk
+// the real route table — see TestEveryAdminRouteIsPermissioned, which is what
+// keeps the default-deny guarantee honest as routes are added.
+func buildRouter(h handlers.Handler, cfg *config.Config, db *gorm.DB) *echo.Echo {
 	e := echo.New()
 	e.HideBanner = true
 	// Identify clients by the direct socket address so rate limiting cannot be
@@ -65,7 +81,6 @@ func main() {
 		AllowHeaders: []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization},
 	}))
 
-	h := handlers.Handler{DB: db, Cfg: cfg, Store: store}
 	api := e.Group("/api/v1")
 
 	// Per-IP rate limiters for unauthenticated POST endpoints. Each endpoint
@@ -94,7 +109,7 @@ func main() {
 
 	// ── Protected (any authenticated user) ──────────────────────────────────
 	protected := api.Group("")
-	protected.Use(appmw.Auth(cfg))
+	protected.Use(appmw.Auth(cfg, db))
 	protected.GET("/auth/me", h.Me)
 	protected.POST("/chat/authenticated", h.Chat)
 
@@ -112,15 +127,20 @@ func main() {
 
 	// ── Admin ────────────────────────────────────────────────────────────────
 	admin := protected.Group("/admin")
+	// Coarse gate: students never reach the admin surface at all.
 	admin.Use(appmw.RequireRoles(models.RoleSuperAdmin, models.RoleAdmin, models.RoleAdmissions))
+	// Fine gate: per-resource permissions, default-deny. This is the single
+	// source of truth (internal/authz) — do NOT add per-route RequireRoles, or
+	// the two will drift.
+	admin.Use(appmw.RequirePermission)
 	// Record every successful admin mutation to the immutable audit trail.
 	admin.Use(h.AuditMutations)
 
 	// Dashboard metrics
 	admin.GET("/metrics", h.Metrics)
 
-	// Audit trail (super-admin + admin only)
-	admin.GET("/audit-logs", h.AdminListAuditLogs, appmw.RequireRoles(models.RoleSuperAdmin, models.RoleAdmin))
+	// Audit trail
+	admin.GET("/audit-logs", h.AdminListAuditLogs)
 
 	// Quotes / contact
 	admin.GET("/quotes", h.ListQuotes)
@@ -136,9 +156,9 @@ func main() {
 	admin.PATCH("/enrollments/:id", h.UpdateEnrollment)
 	admin.POST("/enrollments/:id/invite", h.GenerateInvite)
 
-	// Outbound email diagnostics (super-admin + admin only)
-	admin.GET("/email/status", h.AdminEmailStatus, appmw.RequireRoles(models.RoleSuperAdmin, models.RoleAdmin))
-	admin.POST("/email/test", h.AdminSendTestEmail, appmw.RequireRoles(models.RoleSuperAdmin, models.RoleAdmin))
+	// Outbound email diagnostics
+	admin.GET("/email/status", h.AdminEmailStatus)
+	admin.POST("/email/test", h.AdminSendTestEmail)
 
 	// Students (hub portal — admin-only visibility)
 	admin.GET("/students", h.ListStudents)
@@ -188,17 +208,11 @@ func main() {
 	admin.POST("/opportunities/:id/payments", h.AdminCreatePayment)
 	admin.DELETE("/payments/:id", h.AdminDeletePayment)
 
-	// User management (super-admin + admin only)
-	users := admin.Group("/users", appmw.RequireRoles(models.RoleSuperAdmin, models.RoleAdmin))
-	users.GET("", h.AdminListUsers)
-	users.POST("", h.CreateUser)
-	users.PATCH("/:id", h.AdminUpdateUser)
-	users.DELETE("/:id", h.AdminDeleteUser)
+	// User management (authz grants this to super_admin + admin only)
+	admin.GET("/users", h.AdminListUsers)
+	admin.POST("/users", h.CreateUser)
+	admin.PATCH("/users/:id", h.AdminUpdateUser)
+	admin.DELETE("/users/:id", h.AdminDeleteUser)
 
-	listener, err := net.Listen("tcp4", "0.0.0.0:"+cfg.Port)
-	if err != nil {
-		log.Fatal(err)
-	}
-	e.Listener = listener
-	log.Fatal(e.Start(""))
+	return e
 }

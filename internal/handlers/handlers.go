@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"arcusinvest/internal/authz"
 	"arcusinvest/internal/config"
 	"arcusinvest/internal/models"
 	"arcusinvest/internal/services"
@@ -41,7 +42,10 @@ func (h Handler) Login(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, errResponse(err.Error()))
 	}
-	return c.JSON(http.StatusOK, map[string]any{"token": token, "user": publicUser(user)})
+	// Permissions must be included here as well as on /auth/me: the client stores
+	// this user object straight after login, and a payload without them would make
+	// the UI fall back to a coarse role guess.
+	return c.JSON(http.StatusOK, map[string]any{"token": token, "user": userWithPermissions(user)})
 }
 
 func (h Handler) Me(c echo.Context) error {
@@ -49,7 +53,16 @@ func (h Handler) Me(c echo.Context) error {
 	if err := h.DB.Preload("StudentProfile").First(&user, "id = ?", c.Get("user_id")).Error; err != nil {
 		return c.JSON(http.StatusNotFound, errResponse("user not found"))
 	}
-	return c.JSON(http.StatusOK, publicUser(user))
+	return c.JSON(http.StatusOK, userWithPermissions(user))
+}
+
+// userWithPermissions is publicUser plus the caller's effective permissions, so
+// the UI can hide what it cannot use. Presentation only — the backend remains
+// authoritative via middleware.RequirePermission.
+func userWithPermissions(user models.User) map[string]any {
+	out := publicUser(user)
+	out["permissions"] = authz.PermissionsFor(user.Role)
+	return out
 }
 
 func (h Handler) CreateEnrollment(c echo.Context) error {
@@ -1482,9 +1495,27 @@ func (h Handler) AdminListStaff(c echo.Context) error {
 	return c.JSON(http.StatusOK, result)
 }
 
+// scopeToCaller narrows a query to the caller's own records when their role only
+// grants ScopeOwn on that resource. ownerColumn is the column holding the
+// responsible user (e.g. "owner_id"). A ScopeNone caller never reaches a handler
+// — RequirePermission rejects them first — but it is treated as deny-all here
+// too so this is safe to call unconditionally.
+func scopeToCaller(c echo.Context, q *gorm.DB, res authz.Resource, ownerColumn string) *gorm.DB {
+	role, _ := c.Get("role").(models.Role)
+	switch authz.ReadScope(role, res) {
+	case authz.ScopeAll:
+		return q
+	case authz.ScopeOwn:
+		return q.Where(ownerColumn+" = ?", c.Get("user_id"))
+	default:
+		return q.Where("1 = 0")
+	}
+}
+
 func (h Handler) AdminListOpportunities(c echo.Context) error {
 	var rows []models.Opportunity
 	q := h.DB.Preload("Contacts").Preload("LineItems").Order("created_at desc")
+	q = scopeToCaller(c, q, authz.ResOpportunities, "owner_id")
 	if stage := c.QueryParam("stage"); stage != "" {
 		q = q.Where("stage = ?", stage)
 	}
