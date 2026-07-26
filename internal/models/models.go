@@ -263,6 +263,21 @@ type Contract struct {
 	Size          int64      `json:"size"`
 }
 
+// OpportunityActivity is an attributed entry in a deal's engagement log — a
+// logged call, meeting, email, note, or task. It records who logged it and when
+// the engagement actually happened (OccurredAt), mirroring the CapstoneComment
+// authorship pattern.
+type OpportunityActivity struct {
+	BaseModel
+	OpportunityID uuid.UUID  `json:"opportunity_id" gorm:"type:uuid;index;not null"`
+	ActorID       *uuid.UUID `json:"actor_id" gorm:"type:uuid;index"`
+	ActorName     string     `json:"actor_name" gorm:"not null"`
+	ActorRole     Role       `json:"actor_role"`
+	Type          string     `json:"type" gorm:"index"` // call, meeting, email, note, task, other
+	Body          string     `json:"body" gorm:"type:text;not null"`
+	OccurredAt    time.Time  `json:"occurred_at"` // when the engagement happened (defaults to now)
+}
+
 // OpportunityContact is a member of the account's buying committee for a deal
 // (decision maker, champion, influencer, …).
 type OpportunityContact struct {

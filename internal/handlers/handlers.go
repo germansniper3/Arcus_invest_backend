@@ -1440,6 +1440,98 @@ func (h Handler) AdminConvertQuote(c echo.Context) error {
 	return c.JSON(http.StatusCreated, opportunityJSON(opp))
 }
 
+// --- Engagement log (deal activity timeline) ---
+
+// validActivityTypes whitelists engagement-log entry types.
+var validActivityTypes = map[string]bool{
+	"call": true, "meeting": true, "email": true,
+	"note": true, "task": true, "other": true,
+}
+
+func activityJSON(a models.OpportunityActivity) map[string]any {
+	return map[string]any{
+		"id":             a.ID,
+		"created_at":     a.CreatedAt,
+		"opportunity_id": a.OpportunityID,
+		"actor_id":       a.ActorID,
+		"actor_name":     a.ActorName,
+		"actor_role":     a.ActorRole,
+		"type":           a.Type,
+		"body":           a.Body,
+		"occurred_at":    a.OccurredAt,
+	}
+}
+
+// AdminListActivities returns a deal's engagement log, most-recent engagement first.
+func (h Handler) AdminListActivities(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid opportunity id"))
+	}
+	var rows []models.OpportunityActivity
+	if err := h.DB.Where("opportunity_id = ?", id).Order("occurred_at desc, created_at desc").Find(&rows).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not load activities"))
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for _, a := range rows {
+		out = append(out, activityJSON(a))
+	}
+	return c.JSON(http.StatusOK, out)
+}
+
+// AdminCreateActivity appends an attributed entry to a deal's engagement log.
+// The entry is attributed to the acting admin; OccurredAt lets the caller
+// back-date an engagement (e.g. a call logged after the fact).
+func (h Handler) AdminCreateActivity(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid opportunity id"))
+	}
+	var opp models.Opportunity
+	if err := h.DB.First(&opp, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("opportunity not found"))
+	}
+	var req struct {
+		Type       string     `json:"type"`
+		Body       string     `json:"body"`
+		OccurredAt *time.Time `json:"occurred_at"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid request body"))
+	}
+	if strings.TrimSpace(req.Body) == "" {
+		return c.JSON(http.StatusBadRequest, errResponse("an activity note is required"))
+	}
+	actType := strings.TrimSpace(req.Type)
+	if actType == "" {
+		actType = "note"
+	}
+	if !validActivityTypes[actType] {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid activity type"))
+	}
+	occurred := time.Now()
+	if req.OccurredAt != nil {
+		occurred = *req.OccurredAt
+	}
+	activity := models.OpportunityActivity{
+		OpportunityID: id,
+		Type:          actType,
+		Body:          strings.TrimSpace(req.Body),
+		OccurredAt:    occurred,
+	}
+	// Attribute to the acting admin (best-effort; the entry is still valid without).
+	var actor models.User
+	if err := h.DB.First(&actor, "id = ?", c.Get("user_id")).Error; err == nil {
+		activity.ActorID = &actor.ID
+		activity.ActorName = actor.FullName
+		activity.ActorRole = actor.Role
+	}
+	if err := h.DB.Create(&activity).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not save activity"))
+	}
+	return c.JSON(http.StatusCreated, activityJSON(activity))
+}
+
 // AdminPipelineForecast summarises the pipeline: open value, weighted forecast,
 // per-stage counts/value, and win rate — the numbers behind the forecast board.
 func (h Handler) AdminPipelineForecast(c echo.Context) error {

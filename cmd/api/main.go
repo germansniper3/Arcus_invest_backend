@@ -171,6 +171,8 @@ func main() {
 	admin.POST("/opportunities", h.AdminCreateOpportunity)
 	admin.PUT("/opportunities/:id", h.AdminUpdateOpportunity)
 	admin.DELETE("/opportunities/:id", h.AdminDeleteOpportunity)
+	admin.GET("/opportunities/:id/activities", h.AdminListActivities)
+	admin.POST("/opportunities/:id/activities", h.AdminCreateActivity)
 
 	// User management (super-admin + admin only)
 	admin.POST("/users", h.CreateUser, appmw.RequireRoles(models.RoleSuperAdmin, models.RoleAdmin))
