@@ -44,13 +44,14 @@ const (
 	ResEmail         Resource = "email"
 	ResMetrics       Resource = "metrics"
 	ResRoles         Resource = "roles"
+	ResGallery       Resource = "gallery"
 )
 
 // AllResources is the enumeration used by the permissions payload and tests.
 var AllResources = []Resource{
 	ResOpportunities, ResAccounts, ResContracts, ResPayments, ResQuotes,
 	ResEnrollments, ResStudents, ResEvents, ResProducts, ResUsers,
-	ResAudit, ResEmail, ResMetrics, ResRoles,
+	ResAudit, ResEmail, ResMetrics, ResRoles, ResGallery,
 }
 
 type Action string
@@ -114,13 +115,14 @@ var BuiltInGrants = map[models.Role]map[Resource]Grant{
 		ResPayments: full(), ResQuotes: full(), ResEnrollments: full(),
 		ResStudents: full(), ResEvents: full(), ResProducts: full(),
 		ResUsers: full(), ResAudit: full(), ResEmail: full(), ResMetrics: readOnly(),
-		ResRoles: full(),
+		ResRoles: full(), ResGallery: full(),
 	},
 	models.RoleAdmin: {
 		ResOpportunities: full(), ResAccounts: full(), ResContracts: full(),
 		ResPayments: full(), ResQuotes: full(), ResEnrollments: full(),
 		ResStudents: full(), ResEvents: full(), ResProducts: full(),
 		ResUsers: full(), ResAudit: full(), ResEmail: full(), ResMetrics: readOnly(),
+		ResGallery: full(),
 	},
 	models.RoleAdmissions: {
 		ResEnrollments: full(),
@@ -343,6 +345,7 @@ var pathResources = map[string]Resource{
 	"email":      ResEmail,
 	"metrics":    ResMetrics,
 	"roles":      ResRoles,
+	"gallery":    ResGallery,
 }
 
 // ResourceForPath derives the resource a matched admin route acts on. The second

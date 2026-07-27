@@ -344,6 +344,19 @@ type ChatMessage struct {
 	Source   string     `json:"source"`
 }
 
+// GalleryItem is a photo of Arcus's work shown on the public site. Images are
+// uploaded through the same pipeline as product images and referenced by URL,
+// so the bytes live in the storage layer rather than the database.
+type GalleryItem struct {
+	BaseModel
+	Title       string `json:"title" gorm:"not null"`
+	Caption     string `json:"caption" gorm:"type:text"`
+	Category    string `json:"category" gorm:"index"` // e.g. Electronics, Fabrication, Software
+	ImageURL    string `json:"image_url" gorm:"not null"`
+	Position    int    `json:"position" gorm:"index"` // display order, ascending
+	IsPublished bool   `json:"is_published" gorm:"default:true;index"`
+}
+
 type Product struct {
 	BaseModel
 	Name        string  `json:"name" gorm:"not null"`

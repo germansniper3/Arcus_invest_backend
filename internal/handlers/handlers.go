@@ -172,10 +172,18 @@ func (h Handler) UpdateEnrollment(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, errResponse("invalid request body"))
 	}
 	updates := map[string]any{}
-	if req.Status != ""        { updates["status"] = req.Status }
-	if req.Notes != ""         { updates["notes"] = req.Notes }
-	if req.Tier != ""          { updates["tier"] = req.Tier }
-	if req.OrientationAt != nil { updates["orientation_at"] = req.OrientationAt }
+	if req.Status != "" {
+		updates["status"] = req.Status
+	}
+	if req.Notes != "" {
+		updates["notes"] = req.Notes
+	}
+	if req.Tier != "" {
+		updates["tier"] = req.Tier
+	}
+	if req.OrientationAt != nil {
+		updates["orientation_at"] = req.OrientationAt
+	}
 	var row models.Enrollment
 	if err := h.DB.First(&row, "id = ?", id).Error; err != nil {
 		return c.JSON(http.StatusNotFound, errResponse("enrollment not found"))
@@ -278,9 +286,9 @@ func (h Handler) PreviewInvitation(c echo.Context) error {
 	var enrollment models.Enrollment
 	h.DB.First(&enrollment, "id = ?", invite.EnrollmentID)
 	return c.JSON(http.StatusOK, map[string]any{
-		"email":     invite.Email,
-		"full_name": enrollment.FullName,
-		"tier":      enrollment.Tier,
+		"email":      invite.Email,
+		"full_name":  enrollment.FullName,
+		"tier":       enrollment.Tier,
 		"expires_at": invite.ExpiresAt,
 	})
 }
@@ -640,7 +648,9 @@ func (h Handler) CreateReservation(c echo.Context) error {
 	}
 	if idRaw, ok := c.Get("user_id").(string); ok && idRaw != "" {
 		id := services.UserIDFromString(idRaw)
-		if id != uuid.Nil { res.UserID = &id }
+		if id != uuid.Nil {
+			res.UserID = &id
+		}
 	}
 	if err := h.DB.Create(&res).Error; err != nil {
 		return c.JSON(http.StatusInternalServerError, errResponse("could not save reservation"))
@@ -714,19 +724,35 @@ func (h Handler) AdminUpdateEvent(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, errResponse("invalid body"))
 	}
-	if req.Title != nil { event.Title = *req.Title }
-	if req.Description != nil { event.Description = *req.Description }
-	if req.Location != nil { event.Location = *req.Location }
-	if req.ImageURL != nil { event.ImageURL = *req.ImageURL }
-	if req.Slug != nil { event.Slug = *req.Slug }
-	if req.Capacity != nil { event.Capacity = *req.Capacity }
-	if req.IsPublished != nil { event.IsPublished = *req.IsPublished }
+	if req.Title != nil {
+		event.Title = *req.Title
+	}
+	if req.Description != nil {
+		event.Description = *req.Description
+	}
+	if req.Location != nil {
+		event.Location = *req.Location
+	}
+	if req.ImageURL != nil {
+		event.ImageURL = *req.ImageURL
+	}
+	if req.Slug != nil {
+		event.Slug = *req.Slug
+	}
+	if req.Capacity != nil {
+		event.Capacity = *req.Capacity
+	}
+	if req.IsPublished != nil {
+		event.IsPublished = *req.IsPublished
+	}
 	if req.Date != nil && *req.Date != "" {
 		parsed, err := time.Parse("2006-01-02T15:04", *req.Date)
 		if err != nil {
 			parsed, err = time.Parse(time.RFC3339, *req.Date)
 		}
-		if err == nil { event.Date = parsed }
+		if err == nil {
+			event.Date = parsed
+		}
 	}
 	h.DB.Save(&event)
 	return c.JSON(http.StatusOK, event)
@@ -913,7 +939,9 @@ func (h Handler) Chat(c echo.Context) error {
 	msg := models.ChatMessage{SessionID: req.SessionID, Question: req.Question, Answer: answer, Source: source}
 	if idRaw, ok := c.Get("user_id").(string); ok && idRaw != "" {
 		id := services.UserIDFromString(idRaw)
-		if id != uuid.Nil { msg.UserID = &id }
+		if id != uuid.Nil {
+			msg.UserID = &id
+		}
 	}
 	_ = h.DB.Create(&msg).Error
 	return c.JSON(http.StatusOK, msg)
@@ -1221,14 +1249,30 @@ func (h Handler) AdminUpdateProduct(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, errResponse("invalid body"))
 	}
-	if req.Name != nil { row.Name = *req.Name }
-	if req.Description != nil { row.Description = *req.Description }
-	if req.Specs != nil { row.Specs = *req.Specs }
-	if req.ImageURL != nil { row.ImageURL = *req.ImageURL }
-	if req.Slug != nil { row.Slug = *req.Slug }
-	if req.Price != nil { row.Price = *req.Price }
-	if req.Stock != nil { row.Stock = *req.Stock }
-	if req.IsPublished != nil { row.IsPublished = *req.IsPublished }
+	if req.Name != nil {
+		row.Name = *req.Name
+	}
+	if req.Description != nil {
+		row.Description = *req.Description
+	}
+	if req.Specs != nil {
+		row.Specs = *req.Specs
+	}
+	if req.ImageURL != nil {
+		row.ImageURL = *req.ImageURL
+	}
+	if req.Slug != nil {
+		row.Slug = *req.Slug
+	}
+	if req.Price != nil {
+		row.Price = *req.Price
+	}
+	if req.Stock != nil {
+		row.Stock = *req.Stock
+	}
+	if req.IsPublished != nil {
+		row.IsPublished = *req.IsPublished
+	}
 
 	if err := h.DB.Save(&row).Error; err != nil {
 		return c.JSON(http.StatusInternalServerError, errResponse("could not update product"))
@@ -1325,6 +1369,207 @@ func (h Handler) ServeProductImage(c echo.Context) error {
 		contentType = "application/octet-stream"
 	}
 	// Immutable: keys are content-addressed by uuid, so the bytes never change.
+	c.Response().Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	return c.Stream(http.StatusOK, contentType, rc)
+}
+
+// --- Gallery (public "our work" showcase) ---
+
+// galleryCategories whitelists the groupings shown on the public site.
+var galleryCategories = map[string]bool{
+	"Electronics": true, "Fabrication": true, "Software": true,
+	"Prototyping": true, "Installations": true, "Other": true,
+}
+
+// ListPublicGallery returns published gallery items for the public site,
+// ordered by the admin-chosen position.
+func (h Handler) ListPublicGallery(c echo.Context) error {
+	var rows []models.GalleryItem
+	if err := h.DB.Where("is_published = ?", true).
+		Order("position asc, created_at desc").Find(&rows).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not load gallery"))
+	}
+	return c.JSON(http.StatusOK, rows)
+}
+
+// AdminListGallery returns every item, published or not.
+func (h Handler) AdminListGallery(c echo.Context) error {
+	var rows []models.GalleryItem
+	if err := h.DB.Order("position asc, created_at desc").Find(&rows).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not load gallery"))
+	}
+	return c.JSON(http.StatusOK, rows)
+}
+
+type galleryRequest struct {
+	Title       string `json:"title"`
+	Caption     string `json:"caption"`
+	Category    string `json:"category"`
+	ImageURL    string `json:"image_url"`
+	Position    *int   `json:"position"`
+	IsPublished *bool  `json:"is_published"`
+}
+
+func (h Handler) AdminCreateGalleryItem(c echo.Context) error {
+	var req galleryRequest
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid request body"))
+	}
+	req.Title = strings.TrimSpace(req.Title)
+	req.ImageURL = strings.TrimSpace(req.ImageURL)
+	if req.Title == "" {
+		return c.JSON(http.StatusBadRequest, errResponse("a title is required"))
+	}
+	if req.ImageURL == "" {
+		return c.JSON(http.StatusBadRequest, errResponse("upload an image first"))
+	}
+	category := strings.TrimSpace(req.Category)
+	if category == "" {
+		category = "Other"
+	}
+	if !galleryCategories[category] {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid category"))
+	}
+
+	item := models.GalleryItem{
+		Title:       req.Title,
+		Caption:     strings.TrimSpace(req.Caption),
+		Category:    category,
+		ImageURL:    req.ImageURL,
+		IsPublished: true,
+	}
+	if req.Position != nil {
+		item.Position = *req.Position
+	} else {
+		// Append to the end so new photos do not jump to the front.
+		var maxPos struct{ Max *int }
+		h.DB.Model(&models.GalleryItem{}).Select("MAX(position) as max").Scan(&maxPos)
+		if maxPos.Max != nil {
+			item.Position = *maxPos.Max + 1
+		}
+	}
+	if req.IsPublished != nil {
+		item.IsPublished = *req.IsPublished
+	}
+	if err := h.DB.Create(&item).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not create gallery item"))
+	}
+	return c.JSON(http.StatusCreated, item)
+}
+
+func (h Handler) AdminUpdateGalleryItem(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid gallery item id"))
+	}
+	var row models.GalleryItem
+	if err := h.DB.First(&row, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("gallery item not found"))
+	}
+	var req galleryRequest
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid body"))
+	}
+	updates := map[string]any{}
+	if t := strings.TrimSpace(req.Title); t != "" {
+		updates["title"] = t
+	}
+	if req.Caption != "" || req.Title != "" {
+		updates["caption"] = strings.TrimSpace(req.Caption)
+	}
+	if cat := strings.TrimSpace(req.Category); cat != "" {
+		if !galleryCategories[cat] {
+			return c.JSON(http.StatusBadRequest, errResponse("invalid category"))
+		}
+		updates["category"] = cat
+	}
+	if u := strings.TrimSpace(req.ImageURL); u != "" {
+		updates["image_url"] = u
+	}
+	if req.Position != nil {
+		updates["position"] = *req.Position
+	}
+	if req.IsPublished != nil {
+		updates["is_published"] = *req.IsPublished
+	}
+	if len(updates) == 0 {
+		return c.JSON(http.StatusBadRequest, errResponse("nothing to update"))
+	}
+	if err := h.DB.Model(&row).Updates(updates).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not update gallery item"))
+	}
+	h.DB.First(&row, "id = ?", id)
+	return c.JSON(http.StatusOK, row)
+}
+
+func (h Handler) AdminDeleteGalleryItem(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid gallery item id"))
+	}
+	if err := h.DB.Delete(&models.GalleryItem{}, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not delete gallery item"))
+	}
+	return c.JSON(http.StatusOK, map[string]string{"message": "gallery item deleted"})
+}
+
+// UploadGalleryImage stores a gallery photo and returns the API-relative path.
+// Same limits and whitelist as product images.
+func (h Handler) UploadGalleryImage(c echo.Context) error {
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("an image file is required"))
+	}
+	if fileHeader.Size <= 0 {
+		return c.JSON(http.StatusBadRequest, errResponse("the uploaded image is empty"))
+	}
+	if fileHeader.Size > maxProductImageSize {
+		return c.JSON(http.StatusBadRequest, errResponse("image too large — the maximum size is 5 MB"))
+	}
+	ext := strings.ToLower(filepath.Ext(fileHeader.Filename))
+	if !allowedProductImageExts[ext] {
+		return c.JSON(http.StatusBadRequest, errResponse("unsupported image type — allowed: png, jpg, jpeg, webp, gif"))
+	}
+	contentType := mime.TypeByExtension(ext)
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	src, err := fileHeader.Open()
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("could not read the uploaded image"))
+	}
+	defer src.Close()
+
+	name := uuid.NewString() + ext
+	key := "gallery-images/" + name
+	if err := h.Store.Save(key, src, fileHeader.Size, contentType); err != nil {
+		c.Logger().Errorf("gallery image storage failed (driver=%s dir=%s key=%s): %v", h.Cfg.StorageDriver, h.Cfg.StorageDir, key, err)
+		return c.JSON(http.StatusInternalServerError, errResponse("could not store the uploaded image"))
+	}
+	return c.JSON(http.StatusCreated, map[string]string{"url": "/gallery/images/" + name})
+}
+
+// ServeGalleryImage streams a gallery photo inline. Public: these appear on the
+// marketing site. Names are server-generated uuid+ext, so path traversal and
+// non-image extensions are rejected outright.
+func (h Handler) ServeGalleryImage(c echo.Context) error {
+	name := c.Param("name")
+	if name == "" || strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid image name"))
+	}
+	ext := strings.ToLower(filepath.Ext(name))
+	if !allowedProductImageExts[ext] {
+		return c.JSON(http.StatusNotFound, errResponse("image not found"))
+	}
+	rc, err := h.Store.Open("gallery-images/" + name)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("image not found"))
+	}
+	defer rc.Close()
+	contentType := mime.TypeByExtension(ext)
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
 	c.Response().Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	return c.Stream(http.StatusOK, contentType, rc)
 }
@@ -3604,5 +3849,3 @@ func publicUser(user models.User) map[string]any {
 		"role": user.Role, "is_active": user.IsActive, "student_profile": user.StudentProfile,
 	}
 }
-
-

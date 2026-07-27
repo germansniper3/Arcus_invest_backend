@@ -109,6 +109,10 @@ func buildRouter(h handlers.Handler, cfg *config.Config, db *gorm.DB) *echo.Echo
 	api.GET("/events/:slug", h.GetPublicEvent)
 	api.POST("/events/:id/reserve", h.CreateReservation, rateLimiter(20))
 
+	// Public gallery
+	api.GET("/gallery", h.ListPublicGallery)
+	api.GET("/gallery/images/:name", h.ServeGalleryImage)
+
 	// Public products
 	api.GET("/products", h.ListPublicProducts)
 	api.GET("/products/images/:name", h.ServeProductImage)
@@ -197,6 +201,13 @@ func buildRouter(h handlers.Handler, cfg *config.Config, db *gorm.DB) *echo.Echo
 	admin.POST("/products/image", h.UploadProductImage)
 	admin.PUT("/products/:id", h.AdminUpdateProduct)
 	admin.DELETE("/products/:id", h.AdminDeleteProduct)
+
+	// Gallery (public "our work" showcase)
+	admin.GET("/gallery", h.AdminListGallery)
+	admin.POST("/gallery", h.AdminCreateGalleryItem)
+	admin.POST("/gallery/image", h.UploadGalleryImage)
+	admin.PUT("/gallery/:id", h.AdminUpdateGalleryItem)
+	admin.DELETE("/gallery/:id", h.AdminDeleteGalleryItem)
 
 	// Opportunities (B2B sales pipeline)
 	admin.GET("/opportunities", h.AdminListOpportunities)

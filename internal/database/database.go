@@ -30,6 +30,7 @@ func Migrate(db *gorm.DB) error {
 		&models.ProgressReport{},
 		&models.ExtensionRequest{},
 		&models.Product{},
+		&models.GalleryItem{},
 		&models.Broadcast{},
 		&models.Submission{},
 		&models.Opportunity{},
