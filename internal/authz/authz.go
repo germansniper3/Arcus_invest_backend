@@ -5,8 +5,9 @@
 //     path, so a NEW admin route that is not mapped to a Resource is refused
 //     rather than silently exposed. TestEveryAdminRouteIsMapped locks that in.
 //   - Read access carries a Scope so a role can be limited to its own records
-//     (ScopeOwn) rather than everything (ScopeAll). No built-in role uses
-//     ScopeOwn today; it is the hook custom roles attach to.
+//     (ScopeOwn) rather than everything (ScopeAll). Notifications are the one
+//     built-in use — an inbox is personal by definition; otherwise ScopeOwn is
+//     the hook custom roles attach to.
 //   - BuiltInGrants is the canonical grant set for built-in roles. Both
 //     seed.Roles() and tests read from it — there is exactly one copy of the
 //     truth, and the regression test runs without a database.
@@ -45,13 +46,16 @@ const (
 	ResMetrics       Resource = "metrics"
 	ResRoles         Resource = "roles"
 	ResGallery       Resource = "gallery"
+	// Notifications are personal: a caller only ever sees their own, so this
+	// grant is ScopeOwn and the handlers filter by user_id regardless.
+	ResNotifications Resource = "notifications"
 )
 
 // AllResources is the enumeration used by the permissions payload and tests.
 var AllResources = []Resource{
 	ResOpportunities, ResAccounts, ResContracts, ResPayments, ResQuotes,
 	ResEnrollments, ResStudents, ResEvents, ResProducts, ResUsers,
-	ResAudit, ResEmail, ResMetrics, ResRoles, ResGallery,
+	ResAudit, ResEmail, ResMetrics, ResRoles, ResGallery, ResNotifications,
 }
 
 type Action string
@@ -100,6 +104,16 @@ func ownAll() Grant {
 	}
 }
 
+// ownInbox is read plus update (marking read) over the caller's own records
+// only. Notifications are raised by the system, never authored or deleted by
+// hand, so create and delete are deliberately absent.
+func ownInbox() Grant {
+	return Grant{
+		Actions: map[Action]bool{ActionRead: true, ActionUpdate: true},
+		Scope:   ScopeOwn,
+	}
+}
+
 // BuiltInGrants is the canonical grant set for built-in roles. It is exported
 // so seed.Roles() can write it to the database and tests can verify the seeded
 // data matches the hardcoded truth exactly. Do NOT duplicate this data — read
@@ -115,21 +129,22 @@ var BuiltInGrants = map[models.Role]map[Resource]Grant{
 		ResPayments: full(), ResQuotes: full(), ResEnrollments: full(),
 		ResStudents: full(), ResEvents: full(), ResProducts: full(),
 		ResUsers: full(), ResAudit: full(), ResEmail: full(), ResMetrics: readOnly(),
-		ResRoles: full(), ResGallery: full(),
+		ResRoles: full(), ResGallery: full(), ResNotifications: ownInbox(),
 	},
 	models.RoleAdmin: {
 		ResOpportunities: full(), ResAccounts: full(), ResContracts: full(),
 		ResPayments: full(), ResQuotes: full(), ResEnrollments: full(),
 		ResStudents: full(), ResEvents: full(), ResProducts: full(),
 		ResUsers: full(), ResAudit: full(), ResEmail: full(), ResMetrics: readOnly(),
-		ResGallery: full(),
+		ResGallery: full(), ResNotifications: ownInbox(),
 	},
 	models.RoleAdmissions: {
-		ResEnrollments: full(),
-		ResStudents:    full(),
-		ResEvents:      full(),
-		ResProducts:    readOnly(),
-		ResMetrics:     readOnly(),
+		ResEnrollments:   full(),
+		ResStudents:      full(),
+		ResEvents:        full(),
+		ResProducts:      readOnly(),
+		ResMetrics:       readOnly(),
+		ResNotifications: ownInbox(),
 	},
 	// Students never enter the admin group; their own routes are guarded
 	// separately and scoped by user_id in the handlers.
@@ -340,12 +355,13 @@ var pathResources = map[string]Resource{
 	"users":            ResUsers,
 	// The staff directory exists to populate the pipeline's owner picker, so it
 	// follows opportunity access rather than user administration.
-	"staff":      ResOpportunities,
-	"audit-logs": ResAudit,
-	"email":      ResEmail,
-	"metrics":    ResMetrics,
-	"roles":      ResRoles,
-	"gallery":    ResGallery,
+	"staff":         ResOpportunities,
+	"audit-logs":    ResAudit,
+	"email":         ResEmail,
+	"metrics":       ResMetrics,
+	"roles":         ResRoles,
+	"gallery":       ResGallery,
+	"notifications": ResNotifications,
 }
 
 // ResourceForPath derives the resource a matched admin route acts on. The second

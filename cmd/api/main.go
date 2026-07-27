@@ -8,6 +8,7 @@ import (
 	appmw "arcusinvest/internal/middleware"
 	"arcusinvest/internal/models"
 	"arcusinvest/internal/seed"
+	"arcusinvest/internal/services"
 	"arcusinvest/internal/storage"
 	"log"
 	"net"
@@ -68,6 +69,13 @@ func main() {
 	if err := handlers.BackfillDocumentVersions(db, store); err != nil {
 		log.Printf("WARN: document version backfill failed: %v", err)
 	}
+
+	// Raise notifications for things needing attention, and send the resulting
+	// mail. Reads permissions through authz so a role that cannot see contracts
+	// is never told about a contract renewal.
+	services.StartNotificationWorker(db, cfg, func(role models.Role, resource string) bool {
+		return authz.Can(role, authz.Resource(resource), authz.ActionRead)
+	}, 15*time.Minute)
 
 	h := handlers.Handler{DB: db, Cfg: cfg, Store: store}
 	e := buildRouter(h, cfg, db)
@@ -221,6 +229,15 @@ func buildRouter(h handlers.Handler, cfg *config.Config, db *gorm.DB) *echo.Echo
 	admin.GET("/opportunities/forecast", h.AdminPipelineForecast)
 	admin.GET("/accounts", h.AdminAccountsIndex)
 	admin.GET("/accounts/:name/recommendations", h.AdminAccountRecommendations)
+
+	// Notifications (personal inbox — every query is scoped to the caller)
+	admin.GET("/notifications", h.AdminListNotifications)
+	// PATCH, not POST: marking read is an update, and the notifications grant is
+	// read+update deliberately — nobody creates or deletes their own inbox items.
+	admin.PATCH("/notifications/read-all", h.AdminMarkAllNotificationsRead)
+	admin.PATCH("/notifications/:id/read", h.AdminMarkNotificationRead)
+	admin.GET("/notifications/preferences", h.AdminGetNotificationPreference)
+	admin.PUT("/notifications/preferences", h.AdminSetNotificationPreference)
 
 	// Contracts (repository + renewal tracking)
 	admin.GET("/contracts", h.AdminListContracts)

@@ -43,6 +43,8 @@ func Migrate(db *gorm.DB) error {
 		&models.DocumentAccessLog{},
 		&models.UserSignature{},
 		&models.ContractSignature{},
+		&models.Notification{},
+		&models.NotificationPreference{},
 		&models.AuditLog{},
 		&models.CustomRole{},
 		&models.CustomRolePermission{},

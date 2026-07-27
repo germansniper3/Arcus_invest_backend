@@ -2,6 +2,7 @@ package services
 
 import (
 	"arcusinvest/internal/config"
+	"arcusinvest/internal/models"
 	"bytes"
 	"crypto/tls"
 	"fmt"
@@ -241,4 +242,42 @@ func SendBroadcastEmail(cfg *config.Config, recipients []string, subject, messag
 	// The visible To header is the sender itself; real recipients stay in the
 	// envelope only, i.e. BCC-style.
 	return sendMail(cfg, recipients, cfg.MailFrom, subject, message)
+}
+
+// SendNotificationEmail sends one notification to one person.
+func SendNotificationEmail(cfg *config.Config, to, title, body string) error {
+	message := fmt.Sprintf(
+		"%s\r\n\r\n%s\r\n\r\nYou can change how often you get these in the admin portal.\r\n\r\n— Arcus Investments\r\n",
+		title, body,
+	)
+	return sendMail(cfg, []string{to}, to, "Arcus: "+title, message)
+}
+
+// SendNotificationDigestEmail sends one message covering everything currently
+// outstanding for a person, which is the default because a message per event
+// gets muted within a week.
+func SendNotificationDigestEmail(cfg *config.Config, to, fullName string, items []models.Notification) error {
+	if len(items) == 0 {
+		return nil
+	}
+	greeting := "Hello"
+	if strings.TrimSpace(fullName) != "" {
+		greeting = "Hi " + strings.TrimSpace(fullName)
+	}
+
+	var lines strings.Builder
+	for _, n := range items {
+		fmt.Fprintf(&lines, "· %s\r\n  %s\r\n\r\n", n.Title, n.Body)
+	}
+
+	noun := "items need"
+	if len(items) == 1 {
+		noun = "item needs"
+	}
+	message := fmt.Sprintf(
+		"%s,\r\n\r\n%d %s your attention:\r\n\r\n%sOpen the admin portal to act on these.\r\n\r\n"+
+			"You can switch to a message per event, or turn these off, in the admin portal.\r\n\r\n— Arcus Investments\r\n",
+		greeting, len(items), noun, lines.String(),
+	)
+	return sendMail(cfg, []string{to}, to, fmt.Sprintf("Arcus: %d %s your attention", len(items), noun), message)
 }

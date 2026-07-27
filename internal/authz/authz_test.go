@@ -127,6 +127,20 @@ func TestAdminsKeepFullAccess(t *testing.T) {
 			if res == ResMetrics {
 				continue // metrics is a read-only rollup
 			}
+			// An inbox is read and marked read, never authored or deleted by
+			// hand — notifications are raised by the sweep. This is a new
+			// resource, so no existing access is being reduced by excluding it.
+			if res == ResNotifications {
+				if !Can(role, res, ActionUpdate) {
+					t.Errorf("%s should be able to mark notifications read", role)
+				}
+				for _, act := range []Action{ActionCreate, ActionDelete} {
+					if Can(role, res, act) {
+						t.Errorf("%s should NOT %s notifications — they are raised by the system", role, act)
+					}
+				}
+				continue
+			}
 			for _, act := range []Action{ActionCreate, ActionUpdate, ActionDelete} {
 				if !Can(role, res, act) {
 					t.Errorf("%s should %s %s", role, act, res)

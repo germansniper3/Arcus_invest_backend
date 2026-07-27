@@ -345,6 +345,53 @@ type DocumentAccessLog struct {
 	UserAgent  string     `json:"user_agent"`
 }
 
+// Notification kinds. Each names a thing that needs a person, which is the bar
+// for raising one — anything that merely happened belongs in AuditLog.
+const (
+	NotifyContractRenewal   = "contract_renewal"
+	NotifySubmissionReview  = "submission_review"
+	NotifyExtensionPending  = "extension_pending"
+	NotifyDealStalled       = "deal_stalled"
+)
+
+// Notification is one item in a staff member's inbox.
+//
+// DedupeKey is what stops the periodic sweep from raising the same thing on
+// every pass: it is unique per recipient, so a second insert for an already
+// known condition is rejected by the database rather than relying on the sweep
+// to remember what it has already seen.
+type Notification struct {
+	BaseModel
+	UserID     uuid.UUID  `json:"user_id" gorm:"type:uuid;index;not null"`
+	Kind       string     `json:"kind" gorm:"index;not null"`
+	Title      string     `json:"title" gorm:"not null"`
+	Body       string     `json:"body" gorm:"type:text"`
+	EntityType string     `json:"entity_type"` // contracts, submissions, opportunities, students
+	EntityID   *uuid.UUID `json:"entity_id" gorm:"type:uuid;index"`
+	ReadAt     *time.Time `json:"read_at"`
+	DedupeKey  string     `json:"-" gorm:"uniqueIndex;not null"`
+	// Whether this has been included in an outbound email yet. Separate from
+	// ReadAt: a digest must send things the user has not read, and must not
+	// re-send things it has already covered.
+	EmailedAt *time.Time `json:"-"`
+}
+
+// EmailMode controls how much outbound mail a user gets from notifications.
+const (
+	EmailModePerEvent = "per_event"
+	EmailModeDigest   = "digest"
+	EmailModeNone     = "none"
+)
+
+// NotificationPreference is one user's email setting. The default is a digest
+// rather than per-event: a message for every event gets muted within a week,
+// and a muted channel is worse than no channel because it looks like it works.
+type NotificationPreference struct {
+	BaseModel
+	UserID    uuid.UUID `json:"user_id" gorm:"type:uuid;uniqueIndex;not null"`
+	EmailMode string    `json:"email_mode" gorm:"not null;default:'digest'"`
+}
+
 // UserSignature is a staff member's saved signature image, so they need not
 // redraw it for every contract. One per user; re-saving replaces it.
 type UserSignature struct {
