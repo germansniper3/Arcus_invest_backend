@@ -3,6 +3,7 @@ package services
 import (
 	"arcusinvest/internal/config"
 	"bytes"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/smtp"
@@ -10,11 +11,63 @@ import (
 	"time"
 )
 
+const (
+	// Fail fast and legibly. smtp.SendMail dials with no timeout at all, so a
+	// blocked port or a TLS-mode mismatch hangs until the OS gives up — which is
+	// what "it timed out" looks like from the admin portal.
+	smtpDialTimeout    = 15 * time.Second
+	smtpSessionTimeout = 45 * time.Second
+)
+
+// dialSMTP opens an authenticated-capable SMTP client, handling BOTH submission
+// styles:
+//
+//   - port 465  — implicit TLS: the connection is TLS from the first byte.
+//   - otherwise — plaintext connect, then upgrade with STARTTLS (port 587).
+//
+// Getting this wrong deadlocks rather than erroring: on 465 a plaintext client
+// waits for a greeting while the server waits for a TLS handshake, so the
+// symptom is a timeout, not a rejection.
+func dialSMTP(cfg *config.Config) (*smtp.Client, error) {
+	addr := net.JoinHostPort(cfg.SMTPHost, cfg.SMTPPort)
+	dialer := &net.Dialer{Timeout: smtpDialTimeout}
+	tlsCfg := &tls.Config{ServerName: cfg.SMTPHost, MinVersion: tls.VersionTLS12}
+
+	if cfg.SMTPPort == "465" {
+		conn, err := tls.DialWithDialer(dialer, "tcp", addr, tlsCfg)
+		if err != nil {
+			return nil, fmt.Errorf("could not open a TLS connection to %s: %w", addr, err)
+		}
+		_ = conn.SetDeadline(time.Now().Add(smtpSessionTimeout))
+		client, err := smtp.NewClient(conn, cfg.SMTPHost)
+		if err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("smtp handshake failed on %s: %w", addr, err)
+		}
+		return client, nil
+	}
+
+	conn, err := dialer.Dial("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("could not connect to %s: %w", addr, err)
+	}
+	_ = conn.SetDeadline(time.Now().Add(smtpSessionTimeout))
+	client, err := smtp.NewClient(conn, cfg.SMTPHost)
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("smtp handshake failed on %s: %w", addr, err)
+	}
+	if ok, _ := client.Extension("STARTTLS"); ok {
+		if err := client.StartTLS(tlsCfg); err != nil {
+			client.Close()
+			return nil, fmt.Errorf("STARTTLS failed on %s: %w", addr, err)
+		}
+	}
+	return client, nil
+}
+
 // sendMail delivers one plain-text message. Recipients are supplied only in the
 // SMTP envelope; the caller decides what the visible To header says.
-//
-// NOTE: net/smtp speaks STARTTLS, which is port 587. Implicit-TLS submission
-// (port 465) is NOT supported and will hang or fail — SMTPAdvice() surfaces that.
 func sendMail(cfg *config.Config, recipients []string, toHeader, subject, body string) error {
 	if !cfg.SMTPConfigured() {
 		return fmt.Errorf("smtp is not configured")
@@ -35,12 +88,39 @@ func sendMail(cfg *config.Config, recipients []string, toHeader, subject, body s
 	msg.WriteString(body)
 	msg.WriteString("\r\n")
 
-	addr := net.JoinHostPort(cfg.SMTPHost, cfg.SMTPPort)
-	var auth smtp.Auth
-	if cfg.SMTPUsername != "" {
-		auth = smtp.PlainAuth("", cfg.SMTPUsername, cfg.SMTPPassword, cfg.SMTPHost)
+	client, err := dialSMTP(cfg)
+	if err != nil {
+		return err
 	}
-	return smtp.SendMail(addr, auth, cfg.SMTPFrom, recipients, msg.Bytes())
+	defer client.Close()
+
+	if cfg.SMTPUsername != "" {
+		if ok, _ := client.Extension("AUTH"); !ok {
+			return fmt.Errorf("server at %s:%s does not offer AUTH (is the port or TLS mode right?)", cfg.SMTPHost, cfg.SMTPPort)
+		}
+		if err := client.Auth(smtp.PlainAuth("", cfg.SMTPUsername, cfg.SMTPPassword, cfg.SMTPHost)); err != nil {
+			return fmt.Errorf("authentication failed for %s: %w", cfg.SMTPUsername, err)
+		}
+	}
+	if err := client.Mail(cfg.SMTPFrom); err != nil {
+		return fmt.Errorf("sender %s rejected: %w", cfg.SMTPFrom, err)
+	}
+	for _, rcpt := range recipients {
+		if err := client.Rcpt(rcpt); err != nil {
+			return fmt.Errorf("recipient %s rejected: %w", rcpt, err)
+		}
+	}
+	w, err := client.Data()
+	if err != nil {
+		return fmt.Errorf("server refused the message body: %w", err)
+	}
+	if _, err := w.Write(msg.Bytes()); err != nil {
+		return fmt.Errorf("writing message failed: %w", err)
+	}
+	if err := w.Close(); err != nil {
+		return fmt.Errorf("server rejected the message: %w", err)
+	}
+	return client.Quit()
 }
 
 // SMTPAdvice returns human-readable problems with the current SMTP settings:
@@ -60,8 +140,14 @@ func SMTPAdvice(cfg *config.Config) []string {
 	if cfg.SMTPFrom == "" {
 		advice = append(advice, "SMTP_FROM is not set — it must be a full address the provider allows you to send from")
 	}
-	if cfg.SMTPPort == "465" {
-		advice = append(advice, "SMTP_PORT is 465 (implicit TLS), which this server cannot use — switch to 587 (STARTTLS)")
+	// 465 (implicit TLS) and 587 (STARTTLS) are both supported. Port 25 is
+	// outbound-blocked by most hosting providers, which presents as a timeout
+	// rather than a rejection.
+	if cfg.SMTPPort == "25" {
+		advice = append(advice, "SMTP_PORT is 25, which most hosts block outbound — use 587 (STARTTLS) or 465 (implicit TLS)")
+	}
+	if p := cfg.SMTPPort; p != "" && p != "25" && p != "465" && p != "587" && p != "2525" {
+		advice = append(advice, "SMTP_PORT is "+p+", an unusual submission port — 587 or 465 are expected")
 	}
 	if cfg.SMTPHost != "" && cfg.SMTPUsername == "" {
 		advice = append(advice, "SMTP_USERNAME is empty, so the connection is unauthenticated — most providers reject that")
