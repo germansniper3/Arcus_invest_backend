@@ -3,6 +3,7 @@ package services
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"net"
 	"strings"
 	"testing"
@@ -201,7 +202,41 @@ func TestSendMailFailsFastOnDeadPort(t *testing.T) {
 	if elapsed > smtpDialTimeout+5*time.Second {
 		t.Errorf("took %v — dial timeout is not being applied", elapsed)
 	}
-	if !strings.Contains(err.Error(), "could not connect") {
-		t.Errorf("error should name the connection failure, got: %v", err)
+	// The message must be actionable for a non-Go admin: name the address and say
+	// what to do, not just surface the raw syscall error.
+	msg := err.Error()
+	if !strings.Contains(msg, port) {
+		t.Errorf("error should name the address it failed on, got: %v", err)
+	}
+	if !strings.Contains(msg, "refused") && !strings.Contains(msg, "could not connect") {
+		t.Errorf("error should explain the connection failure, got: %v", err)
+	}
+	if strings.Contains(msg, "refused") && !strings.Contains(msg, "SMTP_PORT") {
+		t.Errorf("a refused connection should point at SMTP_PORT, got: %v", err)
+	}
+}
+
+// TestExplainDialErrorIsActionable pins that each network failure mode produces
+// guidance rather than a bare Go error. A blocked port is the case that matters
+// most: on a hosting platform that filters outbound SMTP, no settings will work
+// and the admin needs to be told to use an HTTP email API instead.
+func TestExplainDialErrorIsActionable(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want string
+	}{
+		{"dial tcp: lookup smtp.typo.com: no such host", "SMTP_HOST"},
+		{"dial tcp 1.2.3.4:587: i/o timeout", "HTTP email API"},
+		{"dial tcp 1.2.3.4:587: connect: connection refused", "SMTP_PORT"},
+		{"dial tcp 1.2.3.4:587: connect: network is unreachable", "blocked"},
+	}
+	for _, tc := range cases {
+		got := explainDialError("smtp.example.com:587", errors.New(tc.raw)).Error()
+		if !strings.Contains(got, tc.want) {
+			t.Errorf("explainDialError(%q)\n  got:  %s\n  want it to mention %q", tc.raw, got, tc.want)
+		}
+		if !strings.Contains(got, "smtp.example.com:587") {
+			t.Errorf("explainDialError(%q) should name the address, got: %s", tc.raw, got)
+		}
 	}
 }

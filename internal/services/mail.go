@@ -28,6 +28,26 @@ const (
 // Getting this wrong deadlocks rather than erroring: on 465 a plaintext client
 // waits for a greeting while the server waits for a TLS handshake, so the
 // symptom is a timeout, not a rejection.
+// explainDialError turns a Go network error into something a non-Go admin can
+// act on. Connection failures at this layer are almost never the mail settings
+// themselves — they are DNS, a typo, or the platform blocking outbound SMTP.
+func explainDialError(addr string, err error) error {
+	text := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(text, "no such host"):
+		return fmt.Errorf("cannot resolve the mail server hostname (%s) — check SMTP_HOST for a typo: %w", addr, err)
+	case strings.Contains(text, "timeout"), strings.Contains(text, "i/o timeout"), strings.Contains(text, "deadline exceeded"):
+		return fmt.Errorf("timed out connecting to %s — the connection is being blocked, "+
+			"most often because the hosting platform blocks outbound SMTP. Try port 587 or 465, "+
+			"and if both time out use an HTTP email API (Resend/SendGrid/Mailgun) instead of SMTP: %w", addr, err)
+	case strings.Contains(text, "refused"):
+		return fmt.Errorf("connection refused by %s — nothing is accepting mail on that port; check SMTP_PORT (587 or 465): %w", addr, err)
+	case strings.Contains(text, "network is unreachable"), strings.Contains(text, "no route to host"):
+		return fmt.Errorf("no network route to %s — outbound access to this host is blocked: %w", addr, err)
+	}
+	return fmt.Errorf("could not connect to %s: %w", addr, err)
+}
+
 func dialSMTP(cfg *config.Config) (*smtp.Client, error) {
 	addr := net.JoinHostPort(cfg.SMTPHost, cfg.SMTPPort)
 	dialer := &net.Dialer{Timeout: smtpDialTimeout}
@@ -36,7 +56,7 @@ func dialSMTP(cfg *config.Config) (*smtp.Client, error) {
 	if cfg.SMTPPort == "465" {
 		conn, err := tls.DialWithDialer(dialer, "tcp", addr, tlsCfg)
 		if err != nil {
-			return nil, fmt.Errorf("could not open a TLS connection to %s: %w", addr, err)
+			return nil, explainDialError(addr, err)
 		}
 		_ = conn.SetDeadline(time.Now().Add(smtpSessionTimeout))
 		client, err := smtp.NewClient(conn, cfg.SMTPHost)
@@ -49,7 +69,7 @@ func dialSMTP(cfg *config.Config) (*smtp.Client, error) {
 
 	conn, err := dialer.Dial("tcp", addr)
 	if err != nil {
-		return nil, fmt.Errorf("could not connect to %s: %w", addr, err)
+		return nil, explainDialError(addr, err)
 	}
 	_ = conn.SetDeadline(time.Now().Add(smtpSessionTimeout))
 	client, err := smtp.NewClient(conn, cfg.SMTPHost)
