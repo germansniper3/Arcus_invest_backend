@@ -43,3 +43,55 @@ func TestGetFallback(t *testing.T) {
 		t.Fatalf("get = %q, want value", got)
 	}
 }
+
+// TestMailFromFallsBackToSMTPFrom pins backwards compatibility: deployments that
+// predate the transport split set SMTP_FROM, and must keep sending after upgrade
+// without an env-var change.
+func TestMailFromFallsBackToSMTPFrom(t *testing.T) {
+	// Load() requires these two regardless of mail settings.
+	t.Setenv("DATABASE_URL", "postgres://localhost/test")
+	t.Setenv("JWT_SECRET", "secret")
+
+	t.Setenv("SMTP_FROM", "legacy@arcus.test")
+	t.Setenv("MAIL_FROM", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MailFrom != "legacy@arcus.test" {
+		t.Errorf("MailFrom = %q, want the SMTP_FROM fallback", cfg.MailFrom)
+	}
+
+	// When both are set, the canonical name wins.
+	t.Setenv("MAIL_FROM", "current@arcus.test")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MailFrom != "current@arcus.test" {
+		t.Errorf("MailFrom = %q, want MAIL_FROM to take precedence", cfg.MailFrom)
+	}
+}
+
+// TestResendEnvWiringSelectsTransport proves the real env-var names reach the
+// transport decision — the struct-level tests in services/ cannot catch a typo
+// in os.Getenv.
+func TestResendEnvWiringSelectsTransport(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://localhost/test")
+	t.Setenv("JWT_SECRET", "secret")
+	t.Setenv("MAIL_FROM", "ops@arcus.test")
+	t.Setenv("SMTP_HOST", "smtp.gmail.com")
+	t.Setenv("SMTP_PORT", "587")
+	t.Setenv("RESEND_API_KEY", "re_live_key")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ResendAPIKey != "re_live_key" {
+		t.Fatalf("ResendAPIKey = %q — RESEND_API_KEY is not being read", cfg.ResendAPIKey)
+	}
+	if got := cfg.MailTransport(); got != "resend" {
+		t.Errorf("MailTransport() = %q, want resend even with SMTP set", got)
+	}
+}

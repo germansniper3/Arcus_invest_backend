@@ -26,7 +26,10 @@ type Config struct {
 	SMTPPort      string
 	SMTPUsername  string
 	SMTPPassword  string
-	SMTPFrom      string
+	// MailFrom is the sender address for every outbound message, whichever
+	// transport carries it. It is not SMTP-specific.
+	MailFrom     string
+	ResendAPIKey string
 	StorageDriver string
 	StorageDir    string
 	S3Bucket      string
@@ -55,7 +58,10 @@ func Load() (*Config, error) {
 		SMTPPort:          os.Getenv("SMTP_PORT"),
 		SMTPUsername:      os.Getenv("SMTP_USERNAME"),
 		SMTPPassword:      os.Getenv("SMTP_PASSWORD"),
-		SMTPFrom:          os.Getenv("SMTP_FROM"),
+		// MAIL_FROM is the canonical name; SMTP_FROM is still honoured so
+		// existing deployments keep working after the transport split.
+		MailFrom:     get("MAIL_FROM", os.Getenv("SMTP_FROM")),
+		ResendAPIKey: os.Getenv("RESEND_API_KEY"),
 		// Storage: local disk by default; S3_* are parsed but only consulted
 		// when STORAGE_DRIVER=s3. None of these are production-required.
 		StorageDriver: get("STORAGE_DRIVER", "local"),
@@ -90,7 +96,32 @@ func Load() (*Config, error) {
 // SMTPConfigured reports whether the minimum SMTP settings needed to send mail
 // are present.
 func (c *Config) SMTPConfigured() bool {
-	return c.SMTPHost != "" && c.SMTPPort != "" && c.SMTPFrom != ""
+	return c.SMTPHost != "" && c.SMTPPort != "" && c.MailFrom != ""
+}
+
+// ResendConfigured reports whether mail can go out over Resend's HTTPS API.
+// This is the transport to use on hosts that block outbound SMTP ports (Railway
+// blocks 25/465/587 below the Pro plan), since it needs nothing but port 443.
+func (c *Config) ResendConfigured() bool {
+	return c.ResendAPIKey != "" && c.MailFrom != ""
+}
+
+// MailConfigured reports whether ANY transport can deliver mail. Call sites that
+// gate on "can we email this?" want this, not SMTPConfigured.
+func (c *Config) MailConfigured() bool {
+	return c.ResendConfigured() || c.SMTPConfigured()
+}
+
+// MailTransport names the transport that will actually be used. Resend wins when
+// both are set: if an operator configured an API key, they did so to escape SMTP.
+func (c *Config) MailTransport() string {
+	switch {
+	case c.ResendConfigured():
+		return "resend"
+	case c.SMTPConfigured():
+		return "smtp"
+	}
+	return "none"
 }
 
 func TokenTTLHours() int {

@@ -89,17 +89,25 @@ func dialSMTP(cfg *config.Config) (*smtp.Client, error) {
 // sendMail delivers one plain-text message. Recipients are supplied only in the
 // SMTP envelope; the caller decides what the visible To header says.
 func sendMail(cfg *config.Config, recipients []string, toHeader, subject, body string) error {
-	if !cfg.SMTPConfigured() {
-		return fmt.Errorf("smtp is not configured")
+	if !cfg.MailConfigured() {
+		return fmt.Errorf("no email transport is configured")
 	}
 	if len(recipients) == 0 {
 		return fmt.Errorf("no recipients")
 	}
+
+	// Prefer the HTTPS API when it is available: it is the only transport that
+	// works on hosts that block outbound SMTP ports. It builds its own payload
+	// rather than a wire message, so it returns before the header assembly below.
+	if cfg.ResendConfigured() {
+		return sendViaResend(cfg, recipients, toHeader, subject, body)
+	}
+
 	// Strip CR/LF from header values to prevent header injection.
 	scrub := strings.NewReplacer("\r", " ", "\n", " ")
 
 	var msg bytes.Buffer
-	fmt.Fprintf(&msg, "From: %s\r\n", scrub.Replace(cfg.SMTPFrom))
+	fmt.Fprintf(&msg, "From: %s\r\n", scrub.Replace(cfg.MailFrom))
 	fmt.Fprintf(&msg, "To: %s\r\n", scrub.Replace(toHeader))
 	fmt.Fprintf(&msg, "Subject: %s\r\n", scrub.Replace(subject))
 	msg.WriteString("MIME-Version: 1.0\r\n")
@@ -122,8 +130,8 @@ func sendMail(cfg *config.Config, recipients []string, toHeader, subject, body s
 			return fmt.Errorf("authentication failed for %s: %w", cfg.SMTPUsername, err)
 		}
 	}
-	if err := client.Mail(cfg.SMTPFrom); err != nil {
-		return fmt.Errorf("sender %s rejected: %w", cfg.SMTPFrom, err)
+	if err := client.Mail(cfg.MailFrom); err != nil {
+		return fmt.Errorf("sender %s rejected: %w", cfg.MailFrom, err)
 	}
 	for _, rcpt := range recipients {
 		if err := client.Rcpt(rcpt); err != nil {
@@ -143,22 +151,39 @@ func sendMail(cfg *config.Config, recipients []string, toHeader, subject, body s
 	return client.Quit()
 }
 
-// SMTPAdvice returns human-readable problems with the current SMTP settings:
-// which required fields are missing, and configuration that cannot work with
-// this STARTTLS-only implementation. An empty slice means the settings look sane
-// (it does not prove delivery works — use SendTestEmail for that).
-func SMTPAdvice(cfg *config.Config) []string {
+// MailAdvice returns human-readable problems with the current email settings,
+// checked against whichever transport is actually in play. An empty slice means
+// the settings look sane (it does not prove delivery works — use SendTestEmail
+// for that).
+func MailAdvice(cfg *config.Config) []string {
 	// Must be an empty slice, never nil: a nil slice marshals to JSON `null`,
 	// and clients that do `issues.length` would crash on a healthy configuration.
 	advice := []string{}
+
+	// With an API key present, SMTP settings are inert — auditing them would
+	// report problems that cannot affect delivery.
+	if cfg.ResendAPIKey != "" {
+		if cfg.MailFrom == "" {
+			advice = append(advice, "MAIL_FROM is not set — it must be an address on a domain you have verified with Resend")
+		}
+		if !strings.Contains(cfg.MailFrom, "@") && cfg.MailFrom != "" {
+			advice = append(advice, "MAIL_FROM is not a full email address")
+		}
+		if strings.HasSuffix(strings.ToLower(cfg.MailFrom), "@resend.dev") {
+			advice = append(advice, "MAIL_FROM uses resend.dev, which can only deliver to your own Resend account address — "+
+				"verify your domain at resend.com/domains before inviting students")
+		}
+		return advice
+	}
+
 	if cfg.SMTPHost == "" {
 		advice = append(advice, "SMTP_HOST is not set")
 	}
 	if cfg.SMTPPort == "" {
 		advice = append(advice, "SMTP_PORT is not set (use 587)")
 	}
-	if cfg.SMTPFrom == "" {
-		advice = append(advice, "SMTP_FROM is not set — it must be a full address the provider allows you to send from")
+	if cfg.MailFrom == "" {
+		advice = append(advice, "MAIL_FROM (or SMTP_FROM) is not set — it must be a full address the provider allows you to send from")
 	}
 	// 465 (implicit TLS) and 587 (STARTTLS) are both supported. Port 25 is
 	// outbound-blocked by most hosting providers, which presents as a timeout
@@ -215,5 +240,5 @@ func SendInvitationEmail(cfg *config.Config, to, fullName, tier, claimURL string
 func SendBroadcastEmail(cfg *config.Config, recipients []string, subject, message string) error {
 	// The visible To header is the sender itself; real recipients stay in the
 	// envelope only, i.e. BCC-style.
-	return sendMail(cfg, recipients, cfg.SMTPFrom, subject, message)
+	return sendMail(cfg, recipients, cfg.MailFrom, subject, message)
 }

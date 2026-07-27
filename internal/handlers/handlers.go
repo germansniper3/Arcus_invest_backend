@@ -210,7 +210,7 @@ func (h Handler) GenerateInvite(c echo.Context) error {
 	// always returned so the admin can still share it manually if delivery fails.
 	emailed := false
 	emailError := ""
-	if h.Cfg.SMTPConfigured() {
+	if h.Cfg.MailConfigured() {
 		var enrollment models.Enrollment
 		h.DB.First(&enrollment, "id = ?", invite.EnrollmentID)
 		if err := services.SendInvitationEmail(h.Cfg, invite.Email, enrollment.FullName, enrollment.Tier, claimURL, invite.ExpiresAt); err != nil {
@@ -220,7 +220,7 @@ func (h Handler) GenerateInvite(c echo.Context) error {
 			emailed = true
 		}
 	} else {
-		emailError = "SMTP is not configured"
+		emailError = "no email transport is configured — set RESEND_API_KEY, or SMTP_HOST/SMTP_PORT"
 	}
 
 	return c.JSON(http.StatusCreated, map[string]any{
@@ -234,27 +234,29 @@ func (h Handler) GenerateInvite(c echo.Context) error {
 // AdminEmailStatus reports whether outbound email is usable, without exposing
 // the password. Diagnostic only — it does not attempt delivery.
 func (h Handler) AdminEmailStatus(c echo.Context) error {
-	advice := services.SMTPAdvice(h.Cfg)
+	advice := services.MailAdvice(h.Cfg)
 	return c.JSON(http.StatusOK, map[string]any{
-		"configured":    h.Cfg.SMTPConfigured(),
+		"configured":    h.Cfg.MailConfigured(),
+		"transport":     h.Cfg.MailTransport(),
 		"host":          h.Cfg.SMTPHost,
 		"port":          h.Cfg.SMTPPort,
-		"from":          h.Cfg.SMTPFrom,
+		"from":          h.Cfg.MailFrom,
 		"has_username":  h.Cfg.SMTPUsername != "",
 		"has_password":  h.Cfg.SMTPPassword != "",
+		"has_api_key":   h.Cfg.ResendAPIKey != "",
 		"frontend_url":  h.Cfg.FrontendURL,
 		"issues":        advice,
-		"looks_healthy": h.Cfg.SMTPConfigured() && len(advice) == 0,
+		"looks_healthy": h.Cfg.MailConfigured() && len(advice) == 0,
 	})
 }
 
 // AdminSendTestEmail sends a diagnostic email to the requesting admin's OWN
 // address, so SMTP can be proven without emailing students.
 func (h Handler) AdminSendTestEmail(c echo.Context) error {
-	if !h.Cfg.SMTPConfigured() {
+	if !h.Cfg.MailConfigured() {
 		return c.JSON(http.StatusBadRequest, map[string]any{
-			"error":  "SMTP is not configured — set SMTP_HOST, SMTP_PORT and SMTP_FROM",
-			"issues": services.SMTPAdvice(h.Cfg),
+			"error":  "no email transport is configured — set RESEND_API_KEY and MAIL_FROM, or SMTP_HOST/SMTP_PORT/MAIL_FROM",
+			"issues": services.MailAdvice(h.Cfg),
 		})
 	}
 	var actor models.User
@@ -262,10 +264,10 @@ func (h Handler) AdminSendTestEmail(c echo.Context) error {
 		return c.JSON(http.StatusNotFound, errResponse("could not resolve your account"))
 	}
 	if err := services.SendTestEmail(h.Cfg, actor.Email); err != nil {
-		c.Logger().Errorf("SMTP test to %s failed: %v", actor.Email, err)
+		c.Logger().Errorf("%s test email to %s failed: %v", h.Cfg.MailTransport(), actor.Email, err)
 		return c.JSON(http.StatusBadGateway, map[string]any{
 			"error":  "send failed: " + err.Error(),
-			"issues": services.SMTPAdvice(h.Cfg),
+			"issues": services.MailAdvice(h.Cfg),
 		})
 	}
 	return c.JSON(http.StatusOK, map[string]any{
@@ -831,7 +833,7 @@ func (h Handler) AdminBroadcast(c echo.Context) error {
 
 	sent := false
 	var sendErr error
-	if h.Cfg.SMTPConfigured() && len(recipients) > 0 {
+	if h.Cfg.MailConfigured() && len(recipients) > 0 {
 		if sendErr = services.SendBroadcastEmail(h.Cfg, recipients, req.Subject, req.Message); sendErr == nil {
 			now := time.Now().UTC()
 			broadcast.Status = "sent"
@@ -840,16 +842,16 @@ func (h Handler) AdminBroadcast(c echo.Context) error {
 			sent = true
 		} else {
 			// Keep the stored broadcast as 'queued' but make the failure diagnosable.
-			c.Logger().Errorf("broadcast %s: SMTP send failed: %v", broadcast.ID, sendErr)
+			c.Logger().Errorf("broadcast %s: %s send failed: %v", broadcast.ID, h.Cfg.MailTransport(), sendErr)
 		}
 	}
 
-	message := "broadcast stored and queued — email not sent (SMTP not configured)"
+	message := "broadcast stored and queued — email not sent (no transport configured)"
 	if sent {
 		message = "broadcast sent"
 	} else if len(recipients) == 0 {
 		message = "broadcast stored — no confirmed recipients to email"
-	} else if h.Cfg.SMTPConfigured() {
+	} else if h.Cfg.MailConfigured() {
 		message = "broadcast stored and queued — email delivery failed"
 	}
 
