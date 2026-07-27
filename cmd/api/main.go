@@ -62,6 +62,13 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// Contracts uploaded before versioning existed have no version row. Give
+	// them one so their history is not blank. Logged rather than fatal: a
+	// storage hiccup must not stop the API from booting.
+	if err := handlers.BackfillDocumentVersions(db, store); err != nil {
+		log.Printf("WARN: document version backfill failed: %v", err)
+	}
+
 	h := handlers.Handler{DB: db, Cfg: cfg, Store: store}
 	e := buildRouter(h, cfg, db)
 
@@ -222,6 +229,9 @@ func buildRouter(h handlers.Handler, cfg *config.Config, db *gorm.DB) *echo.Echo
 	admin.DELETE("/contracts/:id", h.AdminDeleteContract)
 	admin.POST("/contracts/:id/file", h.UploadContractFile)
 	admin.GET("/contracts/:id/file", h.AdminDownloadContract)
+	admin.GET("/contracts/:id/versions", h.AdminListContractVersions)
+	admin.GET("/contracts/:id/versions/:versionId/file", h.AdminDownloadContractVersion)
+	admin.GET("/contracts/:id/access-log", h.AdminListContractAccessLog)
 	admin.POST("/opportunities", h.AdminCreateOpportunity)
 	admin.PUT("/opportunities/:id", h.AdminUpdateOpportunity)
 	admin.DELETE("/opportunities/:id", h.AdminDeleteOpportunity)

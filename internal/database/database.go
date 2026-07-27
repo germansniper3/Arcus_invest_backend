@@ -39,6 +39,8 @@ func Migrate(db *gorm.DB) error {
 		&models.OpportunityLineItem{},
 		&models.Payment{},
 		&models.Contract{},
+		&models.DocumentVersion{},
+		&models.DocumentAccessLog{},
 		&models.AuditLog{},
 		&models.CustomRole{},
 		&models.CustomRolePermission{},

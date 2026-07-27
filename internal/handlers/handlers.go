@@ -2698,10 +2698,12 @@ func contractJSON(ct models.Contract) map[string]any {
 		"start_date":     ct.StartDate,
 		"renewal_date":   ct.RenewalDate,
 		"notes":          ct.Notes,
-		"file_name":      ct.FileName,
-		"content_type":   ct.ContentType,
-		"size":           ct.Size,
-		"has_file":       ct.StoredKey != "",
+		"file_name":       ct.FileName,
+		"content_type":    ct.ContentType,
+		"size":            ct.Size,
+		"has_file":        ct.StoredKey != "",
+		"file_hash":       ct.FileHash,
+		"current_version": ct.CurrentVersion,
 	}
 }
 
@@ -2875,14 +2877,43 @@ func (h Handler) UploadContractFile(c echo.Context) error {
 	}
 	defer src.Close()
 
+	// A fresh key per upload: replacing a document must never overwrite the
+	// bytes of the one it supersedes, because the old version stays downloadable
+	// through its DocumentVersion row.
 	key := "contracts/" + uuid.NewString() + ext
-	if err := h.Store.Save(key, src, fileHeader.Size, contentType); err != nil {
+	fileHash, err := h.saveHashed(key, src, fileHeader.Size, contentType)
+	if err != nil {
 		c.Logger().Errorf("contract storage failed (driver=%s dir=%s key=%s): %v", h.Cfg.StorageDriver, h.Cfg.StorageDir, key, err)
 		return c.JSON(http.StatusInternalServerError, errResponse("could not store the uploaded file"))
 	}
+
+	version := models.DocumentVersion{
+		ParentType:  models.DocParentContract,
+		ParentID:    ct.ID,
+		Version:     h.nextDocumentVersion(models.DocParentContract, ct.ID),
+		FileName:    filepath.Base(fileHeader.Filename),
+		StoredKey:   key,
+		ContentType: contentType,
+		Size:        fileHeader.Size,
+		FileHash:    fileHash,
+		Note:        strings.TrimSpace(c.FormValue("note")),
+	}
+	var actor models.User
+	if err := h.DB.First(&actor, "id = ?", c.Get("user_id")).Error; err == nil {
+		version.UploadedByID = &actor.ID
+		version.UploadedBy = actor.FullName
+	}
+	// The version row is the durable record, so it is written before the
+	// contract's pointer moves. Failing here leaves the contract on its previous
+	// file rather than pointing at an unversioned upload.
+	if err := h.DB.Create(&version).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not record the document version"))
+	}
+
 	if err := h.DB.Model(&ct).Updates(map[string]any{
-		"file_name": filepath.Base(fileHeader.Filename), "stored_key": key,
+		"file_name": version.FileName, "stored_key": key,
 		"content_type": contentType, "size": fileHeader.Size,
+		"file_hash": fileHash, "current_version": version.Version,
 	}).Error; err != nil {
 		return c.JSON(http.StatusInternalServerError, errResponse("could not save the contract file"))
 	}
@@ -2908,6 +2939,11 @@ func (h Handler) AdminDownloadContract(c echo.Context) error {
 		return c.JSON(http.StatusNotFound, errResponse("contract file not found"))
 	}
 	defer rc.Close()
+
+	// nil version: this is the contract's current file rather than a specific
+	// historical revision.
+	h.recordDocumentAccess(c, models.DocParentContract, ct.ID, nil, "download")
+
 	contentType := ct.ContentType
 	if contentType == "" {
 		contentType = "application/octet-stream"
@@ -3270,7 +3306,8 @@ func (h Handler) CreateSubmission(c echo.Context) error {
 	defer src.Close()
 
 	key := "submissions/" + uuid.NewString() + ext
-	if err := h.Store.Save(key, src, fileHeader.Size, contentType); err != nil {
+	fileHash, err := h.saveHashed(key, src, fileHeader.Size, contentType)
+	if err != nil {
 		c.Logger().Errorf("submission storage failed (driver=%s dir=%s key=%s): %v", h.Cfg.StorageDriver, h.Cfg.StorageDir, key, err)
 		return c.JSON(http.StatusInternalServerError, errResponse("could not store the uploaded file"))
 	}
@@ -3283,6 +3320,7 @@ func (h Handler) CreateSubmission(c echo.Context) error {
 		StoredKey:        key,
 		ContentType:      contentType,
 		Size:             fileHeader.Size,
+		FileHash:         fileHash,
 		Status:           "submitted",
 	}
 	if err := h.DB.Create(&submission).Error; err != nil {
@@ -3299,6 +3337,11 @@ func (h Handler) streamSubmission(c echo.Context, s models.Submission) error {
 		return c.JSON(http.StatusNotFound, errResponse("submission file not found"))
 	}
 	defer rc.Close()
+
+	// Both the student and the admin download route funnel through here, so one
+	// call covers every read of a submission.
+	h.recordDocumentAccess(c, models.DocParentSubmission, s.ID, nil, "download")
+
 	contentType := s.ContentType
 	if contentType == "" {
 		contentType = "application/octet-stream"

@@ -169,7 +169,8 @@ type Submission struct {
 	FileName         string     `json:"file_name"`     // original client filename, display only
 	StoredKey        string     `json:"-" gorm:"not null"` // opaque storage key, never exposed
 	ContentType      string     `json:"content_type"`
-	Size             int64      `json:"size"` // bytes
+	Size             int64      `json:"size"`      // bytes
+	FileHash         string     `json:"file_hash"` // SHA256, lowercase hex
 	Status           string     `json:"status" gorm:"default:'submitted'"` // submitted, accepted, revise
 	ReviewNote       string     `json:"review_note" gorm:"type:text"`
 	ReviewedAt       *time.Time `json:"reviewed_at"`
@@ -286,10 +287,62 @@ type Contract struct {
 	StartDate     *time.Time `json:"start_date"`
 	RenewalDate   *time.Time `json:"renewal_date" gorm:"index"`
 	Notes         string     `json:"notes" gorm:"type:text"`
-	FileName      string     `json:"file_name"`
-	StoredKey     string     `json:"-"`
-	ContentType   string     `json:"content_type"`
-	Size          int64      `json:"size"`
+	// The file fields below describe the CURRENT revision. Every upload also
+	// appends a DocumentVersion, so these are a denormalised pointer at the
+	// latest one rather than the only copy.
+	FileName      string `json:"file_name"`
+	StoredKey     string `json:"-"`
+	ContentType   string `json:"content_type"`
+	Size          int64  `json:"size"`
+	FileHash      string `json:"file_hash"` // SHA256 of the current file, lowercase hex
+	CurrentVersion int   `json:"current_version"`
+}
+
+// Document parent types. Versions and access logs are keyed by (type, id) so
+// one table serves contracts and submissions rather than growing a table per
+// attachment point.
+const (
+	DocParentContract   = "contracts"
+	DocParentSubmission = "submissions"
+)
+
+// DocumentVersion is one uploaded revision of a file attached to a parent
+// record. Uploading a replacement appends a version instead of overwriting, so
+// a superseded document stays retrievable — losing a signed contract because
+// someone re-uploaded is a liability, not an inconvenience.
+//
+// FileHash is the SHA256 of the bytes as stored. It is what proves a document
+// was not swapped after the fact, so it is computed at upload and never
+// recomputed from a file that could already have been replaced.
+type DocumentVersion struct {
+	BaseModel
+	ParentType   string     `json:"parent_type" gorm:"index:idx_docver_parent;not null"`
+	ParentID     uuid.UUID  `json:"parent_id" gorm:"type:uuid;index:idx_docver_parent;not null"`
+	Version       int       `json:"version" gorm:"not null"` // 1-based, ascending per parent
+	FileName     string     `json:"file_name"`               // original client filename, display only
+	StoredKey    string     `json:"-" gorm:"not null"`       // opaque storage key, never exposed
+	ContentType  string     `json:"content_type"`
+	Size         int64      `json:"size"` // bytes
+	FileHash     string     `json:"file_hash" gorm:"index"` // SHA256, lowercase hex
+	Note         string     `json:"note" gorm:"type:text"`  // why this revision replaced the last
+	UploadedByID *uuid.UUID `json:"uploaded_by_id" gorm:"type:uuid;index"`
+	UploadedBy   string     `json:"uploaded_by"` // denormalised, survives user deletion
+}
+
+// DocumentAccessLog records a READ of a stored file. AuditLog covers mutations
+// only, which leaves "who downloaded this contract?" unanswerable — the one
+// question that actually gets asked when a document leaks.
+type DocumentAccessLog struct {
+	BaseModel
+	ParentType string     `json:"parent_type" gorm:"index:idx_docaccess_parent;not null"`
+	ParentID   uuid.UUID  `json:"parent_id" gorm:"type:uuid;index:idx_docaccess_parent;not null"`
+	VersionID  *uuid.UUID `json:"version_id" gorm:"type:uuid;index"` // nil = the current file
+	ActorID    *uuid.UUID `json:"actor_id" gorm:"type:uuid;index"`
+	ActorName  string     `json:"actor_name"`
+	ActorRole  Role       `json:"actor_role"`
+	Action     string     `json:"action" gorm:"index"` // download
+	IP         string     `json:"ip"`
+	UserAgent  string     `json:"user_agent"`
 }
 
 // OpportunityActivity is an attributed entry in a deal's engagement log — a
