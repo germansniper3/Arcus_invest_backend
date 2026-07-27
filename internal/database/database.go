@@ -41,6 +41,8 @@ func Migrate(db *gorm.DB) error {
 		&models.Contract{},
 		&models.DocumentVersion{},
 		&models.DocumentAccessLog{},
+		&models.UserSignature{},
+		&models.ContractSignature{},
 		&models.AuditLog{},
 		&models.CustomRole{},
 		&models.CustomRolePermission{},

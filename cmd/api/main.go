@@ -232,6 +232,12 @@ func buildRouter(h handlers.Handler, cfg *config.Config, db *gorm.DB) *echo.Echo
 	admin.GET("/contracts/:id/versions", h.AdminListContractVersions)
 	admin.GET("/contracts/:id/versions/:versionId/file", h.AdminDownloadContractVersion)
 	admin.GET("/contracts/:id/access-log", h.AdminListContractAccessLog)
+	admin.POST("/contracts/:id/sign", h.AdminSignContract)
+	admin.GET("/contracts/:id/signatures", h.AdminListContractSignatures)
+	// The caller's own saved signature. Grouped under contracts because that is
+	// the only thing it is used for, and so it inherits contract permissions.
+	admin.GET("/contracts/my-signature", h.AdminGetMySignature)
+	admin.DELETE("/contracts/my-signature", h.AdminDeleteMySignature)
 	admin.POST("/opportunities", h.AdminCreateOpportunity)
 	admin.PUT("/opportunities/:id", h.AdminUpdateOpportunity)
 	admin.DELETE("/opportunities/:id", h.AdminDeleteOpportunity)

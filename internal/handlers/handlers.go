@@ -2806,6 +2806,13 @@ func (h Handler) AdminUpdateContract(c echo.Context) error {
 		if !validContractStatuses[*req.Status] {
 			return c.JSON(http.StatusBadRequest, errResponse("invalid status"))
 		}
+		// `signed` is reachable only by actually signing. Allowing it here would
+		// let a dropdown assert a signature that no ContractSignature backs, so
+		// the status would stop meaning anything. Re-sending the value a signed
+		// contract already has is fine — that is an edit of other fields.
+		if *req.Status == "signed" && row.Status != "signed" {
+			return c.JSON(http.StatusBadRequest, errResponse("a contract becomes signed by being signed, not by changing its status"))
+		}
 		updates["status"] = *req.Status
 	}
 	if req.Value != nil {

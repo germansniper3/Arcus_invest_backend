@@ -345,6 +345,47 @@ type DocumentAccessLog struct {
 	UserAgent  string     `json:"user_agent"`
 }
 
+// UserSignature is a staff member's saved signature image, so they need not
+// redraw it for every contract. One per user; re-saving replaces it.
+type UserSignature struct {
+	BaseModel
+	UserID   uuid.UUID `json:"user_id" gorm:"type:uuid;uniqueIndex;not null"`
+	ImagePNG []byte    `json:"-"` // raw PNG bytes, served through a dedicated endpoint
+}
+
+// ContractSignature is the evidence record for one signing event. It is written
+// only by the signing endpoint — never by a status edit — so the `signed` state
+// a contract can reach always has a record behind it.
+//
+// Both hashes are stored: OriginalHash identifies the document that was
+// presented for signature and SignedHash the stamped result. Keeping both is
+// what makes it possible to show later that the thing signed is the thing on
+// file. This records who signed and from where; it makes no claim about the
+// legal status of that signature.
+type ContractSignature struct {
+	BaseModel
+	ContractID  uuid.UUID  `json:"contract_id" gorm:"type:uuid;index;not null"`
+	SignerID    *uuid.UUID `json:"signer_id" gorm:"type:uuid;index"`
+	SignerName  string     `json:"signer_name" gorm:"not null"` // denormalised, survives user deletion
+	SignerEmail string     `json:"signer_email"`
+	SignerRole  Role       `json:"signer_role"`
+	// Placement is stored as page fractions rather than points so the record
+	// stays meaningful independently of the page size it was applied to.
+	Page      int     `json:"page"`
+	PositionX float64 `json:"position_x"`
+	PositionY float64 `json:"position_y"`
+	WidthFrac float64 `json:"width_frac"`
+	SignedAt  time.Time `json:"signed_at"`
+	// Captured at the moment of signing; part of the evidence, not diagnostics.
+	IP        string `json:"ip"`
+	UserAgent string `json:"user_agent"`
+
+	OriginalVersionID *uuid.UUID `json:"original_version_id" gorm:"type:uuid"`
+	SignedVersionID   *uuid.UUID `json:"signed_version_id" gorm:"type:uuid"`
+	OriginalHash      string     `json:"original_hash"`
+	SignedHash        string     `json:"signed_hash"`
+}
+
 // OpportunityActivity is an attributed entry in a deal's engagement log — a
 // logged call, meeting, email, note, or task. It records who logged it and when
 // the engagement actually happened (OccurredAt), mirroring the CapstoneComment
