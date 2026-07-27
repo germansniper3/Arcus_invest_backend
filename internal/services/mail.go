@@ -48,7 +48,9 @@ func sendMail(cfg *config.Config, recipients []string, toHeader, subject, body s
 // this STARTTLS-only implementation. An empty slice means the settings look sane
 // (it does not prove delivery works — use SendTestEmail for that).
 func SMTPAdvice(cfg *config.Config) []string {
-	var advice []string
+	// Must be an empty slice, never nil: a nil slice marshals to JSON `null`,
+	// and clients that do `issues.length` would crash on a healthy configuration.
+	advice := []string{}
 	if cfg.SMTPHost == "" {
 		advice = append(advice, "SMTP_HOST is not set")
 	}
