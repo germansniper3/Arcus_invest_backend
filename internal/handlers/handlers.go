@@ -306,8 +306,8 @@ func (h Handler) ClaimInvitation(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, errResponse("invalid request body"))
 	}
-	if len(req.Password) < 10 {
-		return c.JSON(http.StatusBadRequest, errResponse("password must be at least 10 characters"))
+	if err := services.ValidatePassword(req.Password); err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse(err.Error()))
 	}
 	user, err := services.ClaimInvitation(h.DB, req.Token, req.Password, req.CapstoneTitle, req.CapstoneSummary)
 	if err != nil {
@@ -989,8 +989,8 @@ func (h Handler) CreateUser(c echo.Context) error {
 	if req.FullName == "" {
 		return c.JSON(http.StatusBadRequest, errResponse("full name is required"))
 	}
-	if len(req.Password) < 10 {
-		return c.JSON(http.StatusBadRequest, errResponse("password must be at least 10 characters"))
+	if err := services.ValidatePassword(req.Password); err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse(err.Error()))
 	}
 	// Whitelist roles. Students are created only through invitation claims.
 	role := req.Role

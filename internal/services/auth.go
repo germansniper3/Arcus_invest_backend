@@ -4,6 +4,7 @@ import (
 	"arcusinvest/internal/config"
 	"arcusinvest/internal/models"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -184,4 +185,21 @@ func ClaimInvitation(db *gorm.DB, token string, password string, capstoneTitle s
 func UserIDFromString(value string) uuid.UUID {
 	id, _ := uuid.Parse(value)
 	return id
+}
+
+// MinPasswordLength is the shortest password the system accepts anywhere.
+const MinPasswordLength = 10
+
+// ValidatePassword is the single rule for what a password may be.
+//
+// It exists because the length check was duplicated at every place a password
+// could be set, and a rule copied per call site is a rule that eventually
+// differs per call site — the weakest copy then decides what the system
+// actually enforces. The error text is returned to the user, so it says what to
+// do rather than what went wrong.
+func ValidatePassword(password string) error {
+	if len(password) < MinPasswordLength {
+		return fmt.Errorf("password must be at least %d characters", MinPasswordLength)
+	}
+	return nil
 }
