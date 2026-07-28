@@ -2050,6 +2050,22 @@ func (h Handler) AdminDeleteOpportunity(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, errResponse("invalid opportunity id"))
 	}
+	// Loaded before the delete so the gate has a value to measure against the
+	// threshold and a name to put in front of an approver — "delete deal
+	// 8f3c…" is not a decision anyone can make responsibly. A missing row now
+	// answers 404 rather than reporting a successful delete of nothing.
+	var row models.Opportunity
+	if err := h.DB.First(&row, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("opportunity not found"))
+	}
+	blocked, err := h.gate(c, models.ApprovalDealDelete, models.ApprovalEntityOpportunity, row.ID, row.DealValue,
+		fmt.Sprintf("Delete deal %q — %s", row.Name, zmw(row.DealValue)))
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not check approval requirements"))
+	}
+	if blocked != nil {
+		return h.blockedResponse(c, blocked)
+	}
 	if err := h.DB.Delete(&models.Opportunity{}, "id = ?", id).Error; err != nil {
 		return c.JSON(http.StatusInternalServerError, errResponse("could not delete opportunity"))
 	}
@@ -2258,6 +2274,17 @@ func (h Handler) AdminCreatePayment(c echo.Context) error {
 	}
 	if !validPaymentMethods[method] {
 		return c.JSON(http.StatusBadRequest, errResponse("invalid payment method"))
+	}
+	// A payment has no id until it exists, so the approval is bound to the deal
+	// it lands against. That is also the record an approver needs to look at to
+	// judge whether the receipt is plausible.
+	blocked, gerr := h.gate(c, models.ApprovalPaymentRecord, models.ApprovalEntityOpportunity, opp.ID, req.Amount,
+		fmt.Sprintf("Record a %s payment of %s against %q", method, zmw(req.Amount), opp.Name))
+	if gerr != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not check approval requirements"))
+	}
+	if blocked != nil {
+		return h.blockedResponse(c, blocked)
 	}
 	paidAt := time.Now()
 	if req.PaidAt != nil {
@@ -2885,6 +2912,20 @@ func (h Handler) AdminDeleteContract(c echo.Context) error {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, errResponse("invalid contract id"))
+	}
+	// See AdminDeleteOpportunity: the row is loaded so the gate has something to
+	// measure and an approver has something to read.
+	var ct models.Contract
+	if err := h.DB.First(&ct, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("contract not found"))
+	}
+	blocked, err := h.gate(c, models.ApprovalContractDelete, models.ApprovalEntityContract, ct.ID, ct.Value,
+		fmt.Sprintf("Delete contract %q — %s", ct.Title, zmw(ct.Value)))
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not check approval requirements"))
+	}
+	if blocked != nil {
+		return h.blockedResponse(c, blocked)
 	}
 	if err := h.DB.Delete(&models.Contract{}, "id = ?", id).Error; err != nil {
 		return c.JSON(http.StatusInternalServerError, errResponse("could not delete contract"))

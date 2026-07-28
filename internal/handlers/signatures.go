@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -114,6 +115,23 @@ func (h Handler) AdminSignContract(c echo.Context) error {
 	}
 	if ct.Status != "sent" {
 		return c.JSON(http.StatusConflict, errResponse("send the contract before signing it — only a sent contract can be signed"))
+	}
+
+	// Gated before the signature is decoded or the PDF is touched. Signing is the
+	// least reversible action in the system: it stamps a document, writes an
+	// evidence record and moves the contract to a state only signing can reach.
+	//
+	// Approving does not sign. The approver unblocks this contract for this
+	// signer, who then signs themselves — the identity, IP and user-agent in
+	// ContractSignature have to come from the person actually signing, or the
+	// evidence record asserts something that did not happen.
+	blocked, gerr := h.gate(c, models.ApprovalContractSign, models.ApprovalEntityContract, ct.ID, ct.Value,
+		fmt.Sprintf("Sign contract %q — %s", ct.Title, zmw(ct.Value)))
+	if gerr != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not check approval requirements"))
+	}
+	if blocked != nil {
+		return h.blockedResponse(c, blocked)
 	}
 
 	signature, err := decodeSignaturePNG(req.Image)

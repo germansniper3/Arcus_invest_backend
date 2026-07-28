@@ -442,6 +442,144 @@ func TestRejectionBlocksRetryUntilResubmitted(t *testing.T) {
 	}
 }
 
+func fixtureContract(t *testing.T, db *gorm.DB, value float64, status string) models.Contract {
+	t.Helper()
+	ct := models.Contract{
+		Title: "Approvals Fixture Contract", Value: value, Status: status,
+		// A stored key is needed to reach the signing guards. It is never opened:
+		// the gate refuses before any file work, which the sign test relies on.
+		StoredKey: "contracts/fixture-never-read.pdf", ContentType: "application/pdf",
+		FileName: "fixture.pdf",
+	}
+	if err := db.Create(&ct).Error; err != nil {
+		t.Fatalf("create fixture contract: %v", err)
+	}
+	t.Cleanup(func() {
+		db.Unscoped().Delete(&models.ApprovalRequest{}, "entity_id = ?", ct.ID)
+		db.Unscoped().Delete(&models.Contract{}, "id = ?", ct.ID)
+	})
+	return ct
+}
+
+// TestRecordingALargePaymentIsBlocked pins that no Payment row is written when
+// the gate refuses. Receivables are computed from payments, so a payment that
+// slipped past the gate would silently move the debtor book.
+func TestRecordingALargePaymentIsBlocked(t *testing.T) {
+	db := testDB(t)
+	h := Handler{DB: db}
+	e := echo.New()
+
+	actor := fixtureUser(t, db, models.RoleAdmin)
+	fixtureRule(t, db, models.ApprovalPaymentRecord, 100_000, 1, models.RoleSuperAdmin)
+	deal := fixtureDeal(t, db, 900_000, models.StageNegotiation)
+
+	c, rec := adminCtx(e, http.MethodPost, `{"amount":250000,"method":"bank_transfer"}`, actor)
+	c.SetPath("/api/v1/admin/opportunities/:id/payments")
+	c.SetParamNames("id")
+	c.SetParamValues(deal.ID.String())
+	if err := h.AdminCreatePayment(c); err != nil {
+		t.Fatalf("AdminCreatePayment: %v", err)
+	}
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body = %s", rec.Code, rec.Body.String())
+	}
+
+	var payments int64
+	db.Model(&models.Payment{}).Where("opportunity_id = ?", deal.ID).Count(&payments)
+	if payments != 0 {
+		t.Errorf("%d payments recorded despite the gate returning 409", payments)
+	}
+}
+
+// TestDeletingADealIsBlocked pins that the row survives a refused delete.
+func TestDeletingADealIsBlocked(t *testing.T) {
+	db := testDB(t)
+	h := Handler{DB: db}
+	e := echo.New()
+
+	actor := fixtureUser(t, db, models.RoleAdmin)
+	// MinAmount 0 — deletes are gated regardless of value.
+	fixtureRule(t, db, models.ApprovalDealDelete, 0, 1, models.RoleSuperAdmin)
+	deal := fixtureDeal(t, db, 5_000, models.StageQualified)
+
+	c, rec := adminCtx(e, http.MethodDelete, ``, actor)
+	if err := h.AdminDeleteOpportunity(withDealParam(c, deal.ID)); err != nil {
+		t.Fatalf("AdminDeleteOpportunity: %v", err)
+	}
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body = %s", rec.Code, rec.Body.String())
+	}
+
+	var still models.Opportunity
+	if err := db.First(&still, "id = ?", deal.ID).Error; err != nil {
+		t.Fatal("the deal was soft-deleted despite the gate returning 409")
+	}
+}
+
+// TestDeletingAContractIsBlocked matters more than the deal case: a contract
+// carries document versions and signature evidence that a soft delete orphans.
+func TestDeletingAContractIsBlocked(t *testing.T) {
+	db := testDB(t)
+	h := Handler{DB: db}
+	e := echo.New()
+
+	actor := fixtureUser(t, db, models.RoleAdmin)
+	fixtureRule(t, db, models.ApprovalContractDelete, 0, 1, models.RoleSuperAdmin)
+	ct := fixtureContract(t, db, 400_000, "active")
+
+	c, rec := adminCtx(e, http.MethodDelete, ``, actor)
+	c.SetPath("/api/v1/admin/contracts/:id")
+	c.SetParamNames("id")
+	c.SetParamValues(ct.ID.String())
+	if err := h.AdminDeleteContract(c); err != nil {
+		t.Fatalf("AdminDeleteContract: %v", err)
+	}
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body = %s", rec.Code, rec.Body.String())
+	}
+
+	var still models.Contract
+	if err := db.First(&still, "id = ?", ct.ID).Error; err != nil {
+		t.Fatal("the contract was soft-deleted despite the gate returning 409")
+	}
+}
+
+// TestSigningIsBlockedBeforeAnyFileWork pins that the gate runs ahead of
+// decoding the signature and opening the stored PDF. Handler.Store is
+// deliberately nil here: if the gate let execution reach the storage layer this
+// test would panic rather than quietly pass.
+func TestSigningIsBlockedBeforeAnyFileWork(t *testing.T) {
+	db := testDB(t)
+	h := Handler{DB: db} // no Store on purpose
+	e := echo.New()
+
+	actor := fixtureUser(t, db, models.RoleAdmin)
+	fixtureRule(t, db, models.ApprovalContractSign, 100_000, 1, models.RoleSuperAdmin)
+	ct := fixtureContract(t, db, 400_000, "sent")
+
+	c, rec := adminCtx(e, http.MethodPost, `{"image":"data:image/png;base64,AAAA","page":1}`, actor)
+	c.SetPath("/api/v1/admin/contracts/:id/sign")
+	c.SetParamNames("id")
+	c.SetParamValues(ct.ID.String())
+	if err := h.AdminSignContract(c); err != nil {
+		t.Fatalf("AdminSignContract: %v", err)
+	}
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body = %s", rec.Code, rec.Body.String())
+	}
+
+	var sigs int64
+	db.Model(&models.ContractSignature{}).Where("contract_id = ?", ct.ID).Count(&sigs)
+	if sigs != 0 {
+		t.Errorf("%d signature evidence records written for a blocked signing", sigs)
+	}
+	var after models.Contract
+	db.First(&after, "id = ?", ct.ID)
+	if after.Status != "sent" {
+		t.Errorf("contract status = %q, want it left at sent", after.Status)
+	}
+}
+
 // TestOnlyRequesterCanResubmit keeps the loop pointed back at the originator.
 func TestOnlyRequesterCanResubmit(t *testing.T) {
 	db := testDB(t)
