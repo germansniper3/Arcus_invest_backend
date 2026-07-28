@@ -7,7 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"arcusinvest/internal/authz"
 	"arcusinvest/internal/models"
+	"arcusinvest/internal/services"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -174,6 +176,11 @@ func (h Handler) raise(rule *models.ApprovalRule, action, entityType string, ent
 	if err := h.DB.Create(&pending).Error; err != nil {
 		return nil, err
 	}
+	// Best-effort, like the audit middleware: a notification that fails to send
+	// must not turn a correctly-gated action into a 500.
+	services.NotifyApprovalPending(h.DB, pending, func(r models.Role, resource string) bool {
+		return authz.Can(r, authz.Resource(resource), authz.ActionRead)
+	})
 	return &pending, nil
 }
 
@@ -412,6 +419,10 @@ func (h Handler) AdminApproveRequest(c echo.Context) error {
 		if err := h.finalise(row.ID, models.ApprovalStatusApproved); err != nil {
 			return c.JSON(http.StatusInternalServerError, errResponse("could not finalise the approval"))
 		}
+		// Only once the request is actually decided. Under a two-approver rule
+		// the first sign-off changes nothing the requester can act on, and
+		// telling them otherwise would send them back to retry into a 409.
+		services.NotifyApprovalDecided(h.DB, row, models.DecisionApproved, note.Reason, me.FullName)
 	}
 
 	h.DB.Preload("Decisions").First(&row, "id = ?", row.ID)
@@ -458,6 +469,7 @@ func (h Handler) AdminRejectRequest(c echo.Context) error {
 	if err := h.finalise(row.ID, models.ApprovalStatusRejected); err != nil {
 		return c.JSON(http.StatusInternalServerError, errResponse("could not record the rejection"))
 	}
+	services.NotifyApprovalDecided(h.DB, row, models.DecisionRejected, reason, me.FullName)
 
 	h.DB.Preload("Decisions").First(&row, "id = ?", row.ID)
 	return c.JSON(http.StatusOK, approvalJSON(row))

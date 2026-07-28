@@ -358,10 +358,16 @@ type DocumentAccessLog struct {
 // Notification kinds. Each names a thing that needs a person, which is the bar
 // for raising one — anything that merely happened belongs in AuditLog.
 const (
-	NotifyContractRenewal   = "contract_renewal"
-	NotifySubmissionReview  = "submission_review"
-	NotifyExtensionPending  = "extension_pending"
-	NotifyDealStalled       = "deal_stalled"
+	NotifyContractRenewal  = "contract_renewal"
+	NotifySubmissionReview = "submission_review"
+	NotifyExtensionPending = "extension_pending"
+	NotifyDealStalled      = "deal_stalled"
+	// The two approval kinds are raised inline by the handlers rather than by the
+	// 15-minute sweep. Someone blocked mid-task, and an approver holding up
+	// someone else's work, both need to know now — a quarter of an hour of
+	// silence is long enough for the user to conclude the app is broken.
+	NotifyApprovalPending = "approval_pending"
+	NotifyApprovalDecided = "approval_decided"
 )
 
 // Notification is one item in a staff member's inbox.

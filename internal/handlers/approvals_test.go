@@ -442,6 +442,107 @@ func TestRejectionBlocksRetryUntilResubmitted(t *testing.T) {
 	}
 }
 
+func notificationsFor(db *gorm.DB, userID uuid.UUID, kind string) []models.Notification {
+	var out []models.Notification
+	db.Where("user_id = ? AND kind = ?", userID, kind).Find(&out)
+	return out
+}
+
+// TestApproversAreNotifiedButTheRequesterIsNot pins the recipient rule. A
+// notification inviting someone to approve their own request would contradict
+// the guard that refuses it, and would train people to ignore the bell.
+func TestApproversAreNotifiedButTheRequesterIsNot(t *testing.T) {
+	db := testDB(t)
+	h := Handler{DB: db}
+	e := echo.New()
+
+	// The requester holds the approver role, so role alone would include them.
+	actor := fixtureUser(t, db, models.RoleSuperAdmin)
+	approver := fixtureUser(t, db, models.RoleSuperAdmin)
+	bystander := fixtureUser(t, db, models.RoleAdmissions)
+	t.Cleanup(func() {
+		db.Unscoped().Delete(&models.Notification{}, "user_id IN ?",
+			[]uuid.UUID{actor.ID, approver.ID, bystander.ID})
+	})
+
+	fixtureRule(t, db, models.ApprovalDealCloseWon, 100_000, 1, models.RoleSuperAdmin)
+	deal := fixtureDeal(t, db, 750_000, models.StageNegotiation)
+	blockedRequest(t, h, db, e, actor, deal.ID)
+
+	if got := notificationsFor(db, approver.ID, models.NotifyApprovalPending); len(got) != 1 {
+		t.Errorf("approver got %d pending notifications, want 1", len(got))
+	}
+	if got := notificationsFor(db, actor.ID, models.NotifyApprovalPending); len(got) != 0 {
+		t.Errorf("the requester was invited to approve their own request (%d notifications)", len(got))
+	}
+	// admissions cannot read approvals, so it must not hear about them.
+	if got := notificationsFor(db, bystander.ID, models.NotifyApprovalPending); len(got) != 0 {
+		t.Errorf("a role without approvals access was notified (%d notifications)", len(got))
+	}
+}
+
+// TestRejectionNotifiesTheRequesterWithTheReason is what makes the
+// revise-and-resubmit loop reachable rather than a dead end.
+func TestRejectionNotifiesTheRequesterWithTheReason(t *testing.T) {
+	db := testDB(t)
+	h := Handler{DB: db}
+	e := echo.New()
+
+	actor := fixtureUser(t, db, models.RoleAdmin)
+	approver := fixtureUser(t, db, models.RoleSuperAdmin)
+	t.Cleanup(func() {
+		db.Unscoped().Delete(&models.Notification{}, "user_id IN ?", []uuid.UUID{actor.ID, approver.ID})
+	})
+
+	fixtureRule(t, db, models.ApprovalDealCloseWon, 100_000, 1, models.RoleSuperAdmin)
+	deal := fixtureDeal(t, db, 750_000, models.StageNegotiation)
+
+	raised := blockedRequest(t, h, db, e, actor, deal.ID)
+	decide(t, h, e, approver, raised.ID, true, "discount not authorised")
+
+	got := notificationsFor(db, actor.ID, models.NotifyApprovalDecided)
+	if len(got) != 1 {
+		t.Fatalf("requester got %d decision notifications, want 1", len(got))
+	}
+	if !strings.Contains(got[0].Body, "discount not authorised") {
+		t.Errorf("decision notification omits the reason: %q", got[0].Body)
+	}
+	if got[0].EntityType != "approvals" || got[0].EntityID == nil || *got[0].EntityID != raised.ID {
+		t.Error("decision notification does not point back at the request, so the bell cannot deep-link")
+	}
+}
+
+// TestPartialApprovalDoesNotNotifyTheRequester stops a two-approver rule from
+// telling the requester they are unblocked after one sign-off, which would send
+// them back to retry straight into another 409.
+func TestPartialApprovalDoesNotNotifyTheRequester(t *testing.T) {
+	db := testDB(t)
+	h := Handler{DB: db}
+	e := echo.New()
+
+	actor := fixtureUser(t, db, models.RoleAdmin)
+	first := fixtureUser(t, db, models.RoleSuperAdmin)
+	second := fixtureUser(t, db, models.RoleSuperAdmin)
+	t.Cleanup(func() {
+		db.Unscoped().Delete(&models.Notification{}, "user_id IN ?",
+			[]uuid.UUID{actor.ID, first.ID, second.ID})
+	})
+
+	fixtureRule(t, db, models.ApprovalDealCloseWon, 100_000, 2, models.RoleSuperAdmin)
+	deal := fixtureDeal(t, db, 750_000, models.StageNegotiation)
+
+	raised := blockedRequest(t, h, db, e, actor, deal.ID)
+	decide(t, h, e, first, raised.ID, false, "")
+	if got := notificationsFor(db, actor.ID, models.NotifyApprovalDecided); len(got) != 0 {
+		t.Fatalf("requester notified after 1 of 2 approvals (%d notifications)", len(got))
+	}
+
+	decide(t, h, e, second, raised.ID, false, "")
+	if got := notificationsFor(db, actor.ID, models.NotifyApprovalDecided); len(got) != 1 {
+		t.Errorf("requester got %d notifications after the deciding approval, want 1", len(got))
+	}
+}
+
 func fixtureContract(t *testing.T, db *gorm.DB, value float64, status string) models.Contract {
 	t.Helper()
 	ct := models.Contract{

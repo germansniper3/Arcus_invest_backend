@@ -60,6 +60,67 @@ func staffFor(db *gorm.DB, canRead func(models.Role) bool) []models.User {
 	return out
 }
 
+// NotifyApprovalPending tells the approvers eligible to decide a request that it
+// is waiting on them.
+//
+// Recipients are the active users whose role matches the approver role
+// snapshotted on the request, filtered by read access to approvals — the same
+// permission model the rest of the notifications follow. The requester is
+// excluded even if their role would otherwise qualify, so a notification never
+// invites someone to approve their own request.
+//
+// Raised inline rather than by the sweep: an approver who learns about a blocked
+// colleague fifteen minutes late is fifteen minutes of someone else's work lost.
+func NotifyApprovalPending(db *gorm.DB, req models.ApprovalRequest, canRead func(models.Role, string) bool) {
+	approvers := staffFor(db, func(r models.Role) bool {
+		return r == req.ApproverRole && canRead(r, "approvals")
+	})
+	for _, u := range approvers {
+		if req.RequesterID != nil && u.ID == *req.RequesterID {
+			continue
+		}
+		if err := Raise(db, models.Notification{
+			UserID:     u.ID,
+			Kind:       models.NotifyApprovalPending,
+			Title:      "Approval needed",
+			Body:       fmt.Sprintf("%s requested: %s", req.RequesterName, req.Summary),
+			EntityType: "approvals",
+			EntityID:   &req.ID,
+			DedupeKey:  fmt.Sprintf("%s:%s:%s", models.NotifyApprovalPending, u.ID, req.ID),
+		}); err != nil {
+			log.Printf("WARN: could not raise approval notification for %s: %v", u.ID, err)
+		}
+	}
+}
+
+// NotifyApprovalDecided closes the loop back to whoever raised the request.
+//
+// This is what makes revise-and-resubmit work: without it a rejected requester
+// has no way to learn the answer, let alone the reason, and the request dies
+// silently in a queue nobody revisits.
+func NotifyApprovalDecided(db *gorm.DB, req models.ApprovalRequest, decision, reason, approverName string) {
+	if req.RequesterID == nil {
+		return
+	}
+	title := "Request approved"
+	body := fmt.Sprintf("%s approved: %s", approverName, req.Summary)
+	if decision == models.DecisionRejected {
+		title = "Request rejected"
+		body = fmt.Sprintf("%s rejected: %s — %s", approverName, req.Summary, reason)
+	}
+	if err := Raise(db, models.Notification{
+		UserID:     *req.RequesterID,
+		Kind:       models.NotifyApprovalDecided,
+		Title:      title,
+		Body:       body,
+		EntityType: "approvals",
+		EntityID:   &req.ID,
+		DedupeKey:  fmt.Sprintf("%s:%s:%s", models.NotifyApprovalDecided, *req.RequesterID, req.ID),
+	}); err != nil {
+		log.Printf("WARN: could not raise approval decision notification: %v", err)
+	}
+}
+
 // Sweep raises notifications for everything currently needing attention. It is
 // idempotent: re-running it raises nothing new until the underlying situation
 // changes, because every notification carries a dedupe key derived from the
