@@ -1831,6 +1831,20 @@ func (h Handler) AdminCreateOpportunity(c echo.Context) error {
 	if !validOpportunityStages[stage] {
 		return c.JSON(http.StatusBadRequest, errResponse("invalid stage"))
 	}
+	// A deal created directly at `won` would otherwise walk straight past the
+	// close-won gate, since the gate lives on the stage transition. There is no
+	// record for an approver to look at yet and no id to bind an approval to, so
+	// the honest answer is to refuse the shortcut rather than invent an entity.
+	if stage == models.StageWon {
+		rule, err := h.matchRule(models.ApprovalDealCloseWon, req.DealValue)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, errResponse("could not check approval requirements"))
+		}
+		if rule != nil {
+			return c.JSON(http.StatusConflict, errResponse(
+				"a deal of this value cannot be created already Won — create it, then close it so the approval can be reviewed"))
+		}
+	}
 	grade := models.OpportunityGrade(req.Grade)
 	if grade == "" {
 		grade = models.GradeBronze
@@ -1973,6 +1987,24 @@ func (h Handler) AdminUpdateOpportunity(c echo.Context) error {
 		stage := models.OpportunityStage(*req.Stage)
 		if !validOpportunityStages[stage] {
 			return c.JSON(http.StatusBadRequest, errResponse("invalid stage"))
+		}
+		// Closing as Won is where revenue is recognised, so it is gated on value.
+		// The amount is what the deal will be worth AFTER this request, not
+		// before: raising the value and closing in one call would otherwise be
+		// measured against the old figure and slip under the threshold.
+		if stage == models.StageWon && row.Stage != models.StageWon {
+			amount := row.DealValue
+			if req.DealValue != nil {
+				amount = *req.DealValue
+			}
+			blocked, err := h.gate(c, models.ApprovalDealCloseWon, models.ApprovalEntityOpportunity, row.ID, amount,
+				fmt.Sprintf("Close %q as Won — %s", row.Name, zmw(amount)))
+			if err != nil {
+				return c.JSON(http.StatusInternalServerError, errResponse("could not check approval requirements"))
+			}
+			if blocked != nil {
+				return h.blockedResponse(c, blocked)
+			}
 		}
 		updates["stage"] = stage
 		if req.Probability == nil {
