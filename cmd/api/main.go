@@ -229,6 +229,14 @@ func buildRouter(h handlers.Handler, cfg *config.Config, db *gorm.DB) *echo.Echo
 	admin.GET("/opportunities/forecast", h.AdminPipelineForecast)
 	admin.GET("/accounts", h.AdminAccountsIndex)
 	admin.GET("/accounts/:name/recommendations", h.AdminAccountRecommendations)
+	admin.GET("/accounts/:name/payments", h.AdminAccountPayments)
+
+	// Receivables and exports. Each export sits under the resource it exposes,
+	// so it inherits that resource's permission rather than needing its own.
+	admin.GET("/receivables", h.AdminReceivables)
+	admin.GET("/receivables/export", h.AdminExportReceivablesCSV)
+	admin.GET("/opportunities/export", h.AdminExportPipelineCSV)
+	admin.GET("/payments/export", h.AdminExportPaymentsCSV)
 
 	// Notifications (personal inbox — every query is scoped to the caller)
 	admin.GET("/notifications", h.AdminListNotifications)
@@ -257,6 +265,7 @@ func buildRouter(h handlers.Handler, cfg *config.Config, db *gorm.DB) *echo.Echo
 	admin.DELETE("/contracts/my-signature", h.AdminDeleteMySignature)
 	admin.POST("/opportunities", h.AdminCreateOpportunity)
 	admin.PUT("/opportunities/:id", h.AdminUpdateOpportunity)
+	admin.PATCH("/opportunities/:id/invoiced", h.AdminMarkInvoiced)
 	admin.DELETE("/opportunities/:id", h.AdminDeleteOpportunity)
 	admin.GET("/opportunities/:id/activities", h.AdminListActivities)
 	admin.POST("/opportunities/:id/activities", h.AdminCreateActivity)

@@ -1737,10 +1737,15 @@ func opportunityJSON(o models.Opportunity) map[string]any {
 		"owner_id":          o.OwnerID,
 		"source_quote_id":   o.SourceQuoteID,
 		"expected_close_at": o.ExpectedCloseAt,
+		"invoiced_at":       o.InvoicedAt,
+		"apply_vat":         o.ApplyVat,
 		"notes":             o.Notes,
 		"contacts":          contactsJSON(o.Contacts),
 		"line_items":        lineItemsJSON(o.LineItems),
 		"line_items_total":  lineItemsTotal(o.LineItems),
+		// What the client was billed, VAT included where it applies. Always
+		// computed, never stored — a persisted total drifts as line items change.
+		"invoiced_total": services.InvoicedTotal(o),
 	}
 }
 
@@ -1896,6 +1901,7 @@ func (h Handler) AdminUpdateOpportunity(c echo.Context) error {
 		Segment         *string            `json:"segment"`
 		Contacts        *[]contactRequest  `json:"contacts"`
 		LineItems       *[]lineItemRequest `json:"line_items"`
+		ApplyVat        *bool              `json:"apply_vat"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, errResponse("invalid body"))
@@ -1938,6 +1944,11 @@ func (h Handler) AdminUpdateOpportunity(c echo.Context) error {
 	}
 	if req.Notes != nil {
 		updates["notes"] = *req.Notes
+	}
+	// Whether the invoice carries VAT changes what the client owes, so it is
+	// part of the deal rather than a per-view toggle.
+	if req.ApplyVat != nil {
+		updates["apply_vat"] = *req.ApplyVat
 	}
 	// owner_id: a nil UUID clears the owner (unassign); a real UUID assigns it.
 	if req.OwnerID != nil {

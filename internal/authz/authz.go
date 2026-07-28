@@ -355,7 +355,11 @@ var pathResources = map[string]Resource{
 	"users":            ResUsers,
 	// The staff directory exists to populate the pipeline's owner picker, so it
 	// follows opportunity access rather than user administration.
-	"staff":         ResOpportunities,
+	"staff": ResOpportunities,
+	// The aged receivables report is a view over money owed, so it follows
+	// payment access rather than pipeline access — admissions has no business
+	// reading the debtor book.
+	"receivables":   ResPayments,
 	"audit-logs":    ResAudit,
 	"email":         ResEmail,
 	"metrics":       ResMetrics,

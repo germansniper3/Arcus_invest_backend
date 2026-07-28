@@ -241,6 +241,16 @@ type Opportunity struct {
 	OwnerID         *uuid.UUID           `json:"owner_id" gorm:"type:uuid;index"`
 	SourceQuoteID   *uuid.UUID           `json:"source_quote_id" gorm:"type:uuid;index"` // lead it converted from
 	ExpectedCloseAt *time.Time           `json:"expected_close_at"`
+	// InvoicedAt is when the client was actually billed, set by an explicit
+	// action rather than inferred. It is the only honest basis for ageing a
+	// receivable: ExpectedCloseAt is a forecast, and UpdatedAt moves whenever
+	// anyone edits the record. A deal with no InvoicedAt is not a receivable.
+	InvoicedAt *time.Time `json:"invoiced_at" gorm:"index"`
+	// ApplyVat records whether the issued invoice carried VAT, so the amount
+	// owed can be computed server-side. It was previously a transient toggle in
+	// the document viewer, which meant nothing outside that screen could tell
+	// what the client was actually charged.
+	ApplyVat        bool                 `json:"apply_vat"`
 	Notes           string               `json:"notes" gorm:"type:text"`
 	Contacts        []OpportunityContact `json:"contacts" gorm:"foreignKey:OpportunityID;constraint:OnDelete:CASCADE"`
 	LineItems       []OpportunityLineItem `json:"line_items" gorm:"foreignKey:OpportunityID;constraint:OnDelete:CASCADE"`
