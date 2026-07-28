@@ -101,6 +101,371 @@ func withDealParam(c echo.Context, id uuid.UUID) echo.Context {
 	return c
 }
 
+func withApprovalParam(c echo.Context, id uuid.UUID) echo.Context {
+	c.SetPath("/api/v1/admin/approvals/:id")
+	c.SetParamNames("id")
+	c.SetParamValues(id.String())
+	return c
+}
+
+// closeWon drives the real update handler and returns the recorder, so tests
+// exercise the same path a client does.
+func closeWon(t *testing.T, h Handler, e *echo.Echo, actor models.User, dealID uuid.UUID) *httptest.ResponseRecorder {
+	t.Helper()
+	c, rec := adminCtx(e, http.MethodPut, `{"stage":"won"}`, actor)
+	if err := h.AdminUpdateOpportunity(withDealParam(c, dealID)); err != nil {
+		t.Fatalf("AdminUpdateOpportunity: %v", err)
+	}
+	return rec
+}
+
+// blockedRequest closes a deal, asserts it was gated, and returns the raised
+// request so decision tests start from a real one.
+func blockedRequest(t *testing.T, h Handler, db *gorm.DB, e *echo.Echo, actor models.User, dealID uuid.UUID) models.ApprovalRequest {
+	t.Helper()
+	rec := closeWon(t, h, e, actor, dealID)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected the action to be gated, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var raised models.ApprovalRequest
+	if err := db.Where("entity_id = ? AND status = ?", dealID, models.ApprovalStatusPending).
+		First(&raised).Error; err != nil {
+		t.Fatalf("no pending request raised: %v", err)
+	}
+	return raised
+}
+
+func decide(t *testing.T, h Handler, e *echo.Echo, approver models.User, reqID uuid.UUID, reject bool, reason string) *httptest.ResponseRecorder {
+	t.Helper()
+	body := `{"reason":"` + reason + `"}`
+	c, rec := adminCtx(e, http.MethodPatch, body, approver)
+	var err error
+	if reject {
+		err = h.AdminRejectRequest(withApprovalParam(c, reqID))
+	} else {
+		err = h.AdminApproveRequest(withApprovalParam(c, reqID))
+	}
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	return rec
+}
+
+// TestRequesterCannotApproveOwnRequest is the single most important guard in the
+// feature. Without it, anyone holding the approver role signs off their own
+// transaction and maker-checker is decorative.
+func TestRequesterCannotApproveOwnRequest(t *testing.T) {
+	db := testDB(t)
+	h := Handler{DB: db}
+	e := echo.New()
+
+	// The requester deliberately HOLDS the approver role — the check must be on
+	// identity, not on permission.
+	actor := fixtureUser(t, db, models.RoleSuperAdmin)
+	fixtureRule(t, db, models.ApprovalDealCloseWon, 100_000, 1, models.RoleSuperAdmin)
+	deal := fixtureDeal(t, db, 750_000, models.StageNegotiation)
+
+	raised := blockedRequest(t, h, db, e, actor, deal.ID)
+	rec := decide(t, h, e, actor, raised.ID, false, "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("self-approval status = %d, want 403; body = %s", rec.Code, rec.Body.String())
+	}
+
+	var after models.ApprovalRequest
+	db.First(&after, "id = ?", raised.ID)
+	if after.Status != models.ApprovalStatusPending {
+		t.Errorf("status = %q after self-approval attempt, want it left pending", after.Status)
+	}
+	var votes int64
+	db.Model(&models.ApprovalDecision{}).Where("request_id = ?", raised.ID).Count(&votes)
+	if votes != 0 {
+		t.Errorf("%d decisions recorded for a refused self-approval, want 0", votes)
+	}
+}
+
+// TestWrongRoleCannotDecide pins that the rule's approver role is enforced and
+// that there is no standing super_admin override — a standing override is a
+// standing bypass.
+func TestWrongRoleCannotDecide(t *testing.T) {
+	db := testDB(t)
+	h := Handler{DB: db}
+	e := echo.New()
+
+	actor := fixtureUser(t, db, models.RoleAdmin)
+	wrongRole := fixtureUser(t, db, models.RoleSuperAdmin)
+	fixtureRule(t, db, models.ApprovalDealCloseWon, 100_000, 1, models.RoleAdmissions)
+	deal := fixtureDeal(t, db, 750_000, models.StageNegotiation)
+
+	raised := blockedRequest(t, h, db, e, actor, deal.ID)
+	rec := decide(t, h, e, wrongRole, raised.ID, false, "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 — super_admin decided a request addressed to admissions", rec.Code)
+	}
+}
+
+// TestApprovedRequestUnblocksThenIsSpent covers the happy path and single-use in
+// one run: the retry after approval succeeds, and a later attempt at the same
+// action does not ride the same approval a second time.
+func TestApprovedRequestUnblocksThenIsSpent(t *testing.T) {
+	db := testDB(t)
+	h := Handler{DB: db}
+	e := echo.New()
+
+	actor := fixtureUser(t, db, models.RoleAdmin)
+	approver := fixtureUser(t, db, models.RoleSuperAdmin)
+	fixtureRule(t, db, models.ApprovalDealCloseWon, 100_000, 1, models.RoleSuperAdmin)
+	deal := fixtureDeal(t, db, 750_000, models.StageNegotiation)
+
+	raised := blockedRequest(t, h, db, e, actor, deal.ID)
+
+	if rec := decide(t, h, e, approver, raised.ID, false, ""); rec.Code != http.StatusOK {
+		t.Fatalf("approve status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	var approved models.ApprovalRequest
+	db.First(&approved, "id = ?", raised.ID)
+	if approved.Status != models.ApprovalStatusApproved {
+		t.Fatalf("status = %q, want approved", approved.Status)
+	}
+	if approved.PendingKey != nil {
+		t.Error("pending_key still held after the decision — the requester could never raise another request")
+	}
+
+	// The requester retries; the gate consumes the approval.
+	if rec := closeWon(t, h, e, actor, deal.ID); rec.Code != http.StatusOK {
+		t.Fatalf("retry status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	var after models.Opportunity
+	db.First(&after, "id = ?", deal.ID)
+	if after.Stage != models.StageWon {
+		t.Fatalf("stage = %q after an approved retry, want won", after.Stage)
+	}
+	var spent models.ApprovalRequest
+	db.First(&spent, "id = ?", raised.ID)
+	if spent.Status != models.ApprovalStatusConsumed {
+		t.Errorf("status = %q, want consumed", spent.Status)
+	}
+
+	// Reopen the deal and try again. The approval is spent, so this must be
+	// gated afresh rather than sliding through on the previous sign-off.
+	db.Model(&models.Opportunity{}).Where("id = ?", deal.ID).Update("stage", models.StageNegotiation)
+	if rec := closeWon(t, h, e, actor, deal.ID); rec.Code != http.StatusConflict {
+		t.Fatalf("second close status = %d, want 409 — a consumed approval was reused", rec.Code)
+	}
+}
+
+// TestApprovalIsEntityBound stops an approval to close one deal from closing a
+// different one.
+func TestApprovalIsEntityBound(t *testing.T) {
+	db := testDB(t)
+	h := Handler{DB: db}
+	e := echo.New()
+
+	actor := fixtureUser(t, db, models.RoleAdmin)
+	approver := fixtureUser(t, db, models.RoleSuperAdmin)
+	fixtureRule(t, db, models.ApprovalDealCloseWon, 100_000, 1, models.RoleSuperAdmin)
+	dealA := fixtureDeal(t, db, 750_000, models.StageNegotiation)
+	dealB := fixtureDeal(t, db, 750_000, models.StageNegotiation)
+
+	raised := blockedRequest(t, h, db, e, actor, dealA.ID)
+	decide(t, h, e, approver, raised.ID, false, "")
+
+	if rec := closeWon(t, h, e, actor, dealB.ID); rec.Code != http.StatusConflict {
+		t.Fatalf("deal B status = %d, want 409 — an approval for deal A closed deal B", rec.Code)
+	}
+	var b models.Opportunity
+	db.First(&b, "id = ?", dealB.ID)
+	if b.Stage == models.StageWon {
+		t.Error("deal B was closed using deal A's approval")
+	}
+}
+
+// TestApprovalDoesNotCoverALargerAmount stops the escalation where a small
+// transaction is waved through and then executed at a much larger value.
+func TestApprovalDoesNotCoverALargerAmount(t *testing.T) {
+	db := testDB(t)
+	h := Handler{DB: db}
+	e := echo.New()
+
+	actor := fixtureUser(t, db, models.RoleAdmin)
+	approver := fixtureUser(t, db, models.RoleSuperAdmin)
+	fixtureRule(t, db, models.ApprovalDealCloseWon, 10_000, 1, models.RoleSuperAdmin)
+	deal := fixtureDeal(t, db, 50_000, models.StageNegotiation)
+
+	raised := blockedRequest(t, h, db, e, actor, deal.ID)
+	decide(t, h, e, approver, raised.ID, false, "")
+	if raised.Amount != 50_000 {
+		t.Fatalf("request raised for %v, want 50000", raised.Amount)
+	}
+
+	// Same deal, same approval — but ten times the value.
+	c, rec := adminCtx(e, http.MethodPut, `{"stage":"won","deal_value":500000}`, actor)
+	if err := h.AdminUpdateOpportunity(withDealParam(c, deal.ID)); err != nil {
+		t.Fatalf("AdminUpdateOpportunity: %v", err)
+	}
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 — a 50k approval admitted a 500k close", rec.Code)
+	}
+
+	var stillApproved models.ApprovalRequest
+	db.First(&stillApproved, "id = ?", raised.ID)
+	if stillApproved.Status == models.ApprovalStatusConsumed {
+		t.Error("the 50k approval was consumed by a 500k action")
+	}
+	var after models.Opportunity
+	db.First(&after, "id = ?", deal.ID)
+	if after.Stage == models.StageWon {
+		t.Error("deal closed at 500k on a 50k approval")
+	}
+}
+
+// TestSameApproverCannotSatisfyATwoApproverRule pins that RequiredCount means N
+// distinct people, enforced by the composite unique index rather than by a
+// prior SELECT two concurrent votes could both pass.
+func TestSameApproverCannotSatisfyATwoApproverRule(t *testing.T) {
+	db := testDB(t)
+	h := Handler{DB: db}
+	e := echo.New()
+
+	actor := fixtureUser(t, db, models.RoleAdmin)
+	approver := fixtureUser(t, db, models.RoleSuperAdmin)
+	fixtureRule(t, db, models.ApprovalDealCloseWon, 100_000, 2, models.RoleSuperAdmin)
+	deal := fixtureDeal(t, db, 750_000, models.StageNegotiation)
+
+	raised := blockedRequest(t, h, db, e, actor, deal.ID)
+	if raised.RequiredCount != 2 {
+		t.Fatalf("required_count = %d, want the rule's 2", raised.RequiredCount)
+	}
+
+	if rec := decide(t, h, e, approver, raised.ID, false, ""); rec.Code != http.StatusOK {
+		t.Fatalf("first approval status = %d, want 200", rec.Code)
+	}
+	var mid models.ApprovalRequest
+	db.First(&mid, "id = ?", raised.ID)
+	if mid.Status != models.ApprovalStatusPending {
+		t.Fatalf("status = %q after 1 of 2 approvals, want still pending", mid.Status)
+	}
+
+	// The same person votes again. One human must not count as two.
+	if rec := decide(t, h, e, approver, raised.ID, false, ""); rec.Code != http.StatusConflict {
+		t.Fatalf("duplicate vote status = %d, want 409", rec.Code)
+	}
+	var after models.ApprovalRequest
+	db.First(&after, "id = ?", raised.ID)
+	if after.Status == models.ApprovalStatusApproved {
+		t.Fatal("one approver satisfied a two-approver rule by voting twice")
+	}
+
+	// A second, distinct approver completes it.
+	second := fixtureUser(t, db, models.RoleSuperAdmin)
+	if rec := decide(t, h, e, second, raised.ID, false, ""); rec.Code != http.StatusOK {
+		t.Fatalf("second approval status = %d, want 200", rec.Code)
+	}
+	db.First(&after, "id = ?", raised.ID)
+	if after.Status != models.ApprovalStatusApproved {
+		t.Errorf("status = %q after two distinct approvals, want approved", after.Status)
+	}
+}
+
+// TestRejectRequiresAReason keeps the revise-and-resubmit loop usable: a
+// rejection the requester cannot act on is a dead end.
+func TestRejectRequiresAReason(t *testing.T) {
+	db := testDB(t)
+	h := Handler{DB: db}
+	e := echo.New()
+
+	actor := fixtureUser(t, db, models.RoleAdmin)
+	approver := fixtureUser(t, db, models.RoleSuperAdmin)
+	fixtureRule(t, db, models.ApprovalDealCloseWon, 100_000, 1, models.RoleSuperAdmin)
+	deal := fixtureDeal(t, db, 750_000, models.StageNegotiation)
+
+	raised := blockedRequest(t, h, db, e, actor, deal.ID)
+	if rec := decide(t, h, e, approver, raised.ID, true, "   "); rec.Code != http.StatusBadRequest {
+		t.Fatalf("blank-reason reject status = %d, want 400", rec.Code)
+	}
+	var after models.ApprovalRequest
+	db.First(&after, "id = ?", raised.ID)
+	if after.Status != models.ApprovalStatusPending {
+		t.Errorf("status = %q after a refused rejection, want still pending", after.Status)
+	}
+}
+
+// TestRejectionBlocksRetryUntilResubmitted is the Revise & Resubmit loop: a
+// rejected requester must not be able to simply retry their way past the
+// decision, and the resubmission must be traceable to what it replaced.
+func TestRejectionBlocksRetryUntilResubmitted(t *testing.T) {
+	db := testDB(t)
+	h := Handler{DB: db}
+	e := echo.New()
+
+	actor := fixtureUser(t, db, models.RoleAdmin)
+	approver := fixtureUser(t, db, models.RoleSuperAdmin)
+	fixtureRule(t, db, models.ApprovalDealCloseWon, 100_000, 1, models.RoleSuperAdmin)
+	deal := fixtureDeal(t, db, 750_000, models.StageNegotiation)
+
+	raised := blockedRequest(t, h, db, e, actor, deal.ID)
+	if rec := decide(t, h, e, approver, raised.ID, true, "margin is too thin"); rec.Code != http.StatusOK {
+		t.Fatalf("reject status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+
+	// Retrying must not silently raise a fresh request and reset the clock.
+	rec := closeWon(t, h, e, actor, deal.ID)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("post-rejection retry status = %d, want 409", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "margin is too thin") {
+		t.Errorf("the rejection reason is not surfaced to the requester: %s", rec.Body.String())
+	}
+	var count int64
+	db.Model(&models.ApprovalRequest{}).Where("entity_id = ?", deal.ID).Count(&count)
+	if count != 1 {
+		t.Errorf("%d requests exist after a rejected retry, want 1 — retrying bypassed the rejection", count)
+	}
+
+	// Resubmitting explicitly opens a new request linked to the old one.
+	c, rrec := adminCtx(e, http.MethodPost, `{"summary":"Revised: discount removed"}`, actor)
+	if err := h.AdminResubmitRequest(withApprovalParam(c, raised.ID)); err != nil {
+		t.Fatalf("AdminResubmitRequest: %v", err)
+	}
+	if rrec.Code != http.StatusCreated {
+		t.Fatalf("resubmit status = %d, want 201; body = %s", rrec.Code, rrec.Body.String())
+	}
+	var next models.ApprovalRequest
+	if err := db.Where("entity_id = ? AND status = ?", deal.ID, models.ApprovalStatusPending).
+		First(&next).Error; err != nil {
+		t.Fatalf("no pending request after resubmit: %v", err)
+	}
+	if next.SupersedesID == nil || *next.SupersedesID != raised.ID {
+		t.Errorf("supersedes_id = %v, want the rejected request %v", next.SupersedesID, raised.ID)
+	}
+	if next.Summary != "Revised: discount removed" {
+		t.Errorf("summary = %q, want the revised text", next.Summary)
+	}
+}
+
+// TestOnlyRequesterCanResubmit keeps the loop pointed back at the originator.
+func TestOnlyRequesterCanResubmit(t *testing.T) {
+	db := testDB(t)
+	h := Handler{DB: db}
+	e := echo.New()
+
+	actor := fixtureUser(t, db, models.RoleAdmin)
+	other := fixtureUser(t, db, models.RoleAdmin)
+	approver := fixtureUser(t, db, models.RoleSuperAdmin)
+	fixtureRule(t, db, models.ApprovalDealCloseWon, 100_000, 1, models.RoleSuperAdmin)
+	deal := fixtureDeal(t, db, 750_000, models.StageNegotiation)
+
+	raised := blockedRequest(t, h, db, e, actor, deal.ID)
+	decide(t, h, e, approver, raised.ID, true, "no")
+
+	c, rec := adminCtx(e, http.MethodPost, `{}`, other)
+	if err := h.AdminResubmitRequest(withApprovalParam(c, raised.ID)); err != nil {
+		t.Fatalf("AdminResubmitRequest: %v", err)
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+}
+
 // TestMatchRulePicksHighestApplicableFloor prevents the tiering bug where a
 // K600,000 deal matches the K50,000 manager rule instead of the K500,000
 // director rule, quietly routing a large transaction to a junior approver.

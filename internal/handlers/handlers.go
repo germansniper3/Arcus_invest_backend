@@ -3519,12 +3519,20 @@ func auditAction(method, routePath string) string {
 			return "invite"
 		case strings.HasSuffix(routePath, "/activities"):
 			return "log"
+		case strings.HasSuffix(routePath, "/resubmit"):
+			return "resubmit"
 		default:
 			return "create"
 		}
 	case http.MethodPut, http.MethodPatch:
-		if strings.HasSuffix(routePath, "/approve") {
+		switch {
+		case strings.HasSuffix(routePath, "/approve"):
 			return "approve"
+		// Without this a rejection would be recorded as a generic "update",
+		// making the two halves of a maker-checker decision indistinguishable in
+		// the audit trail — which is the one place they most need to be legible.
+		case strings.HasSuffix(routePath, "/reject"):
+			return "reject"
 		}
 		return "update"
 	case http.MethodDelete:

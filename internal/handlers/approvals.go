@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"arcusinvest/internal/models"
@@ -206,3 +207,316 @@ func (h Handler) blockedResponse(c echo.Context, req *models.ApprovalRequest) er
 // zmw renders an amount for the human-readable summary an approver reads.
 // It reuses the same two-decimal formatting as the CSV exports.
 func zmw(amount float64) string { return "ZMW " + money(amount) }
+
+// ---------------------------------------------------------------------------
+// Decisions
+// ---------------------------------------------------------------------------
+
+func approvalDecisionJSON(d models.ApprovalDecision) map[string]any {
+	return map[string]any{
+		"id":            d.ID,
+		"created_at":    d.CreatedAt,
+		"approver_id":   d.ApproverID,
+		"approver_name": d.ApproverName,
+		"approver_role": d.ApproverRole,
+		"decision":      d.Decision,
+		"reason":        d.Reason,
+	}
+}
+
+func approvalJSON(r models.ApprovalRequest) map[string]any {
+	// Never nil: a nil slice marshals to `null` and a client doing
+	// decisions.length would crash on a request nobody has voted on yet.
+	decisions := []map[string]any{}
+	approved := 0
+	for _, d := range r.Decisions {
+		decisions = append(decisions, approvalDecisionJSON(d))
+		if d.Decision == models.DecisionApproved {
+			approved++
+		}
+	}
+	return map[string]any{
+		"id":             r.ID,
+		"created_at":     r.CreatedAt,
+		"action":         r.Action,
+		"entity_type":    r.EntityType,
+		"entity_id":      r.EntityID,
+		"amount":         r.Amount,
+		"summary":        r.Summary,
+		"status":         r.Status,
+		"requester_id":   r.RequesterID,
+		"requester_name": r.RequesterName,
+		"required_count": r.RequiredCount,
+		"approver_role":  r.ApproverRole,
+		"approved_count": approved,
+		"supersedes_id":  r.SupersedesID,
+		"decided_at":     r.DecidedAt,
+		"consumed_at":    r.ConsumedAt,
+		"decisions":      decisions,
+	}
+}
+
+// caller resolves the authenticated user. Approval records denormalise the name
+// alongside the id so the trail still reads correctly after a user is deleted.
+func (h Handler) caller(c echo.Context) (models.User, error) {
+	var u models.User
+	err := h.DB.First(&u, "id = ?", c.Get("user_id")).Error
+	return u, err
+}
+
+// AdminListApprovals returns the approval queue. Filters are additive:
+// ?status=pending, ?mine=true (raised by the caller), ?awaiting=true (waiting on
+// a decision the caller is eligible to make).
+func (h Handler) AdminListApprovals(c echo.Context) error {
+	me, err := h.caller(c)
+	if err != nil {
+		return c.JSON(http.StatusUnauthorized, errResponse("could not identify the caller"))
+	}
+
+	q := h.DB.Model(&models.ApprovalRequest{})
+	if s := c.QueryParam("status"); s != "" {
+		q = q.Where("status = ?", s)
+	}
+	if c.QueryParam("mine") == "true" {
+		q = q.Where("requester_id = ?", me.ID)
+	}
+	if c.QueryParam("awaiting") == "true" {
+		// Eligible means pending, addressed to the caller's role, and not their
+		// own — the same three conditions the approve endpoint enforces, so the
+		// list never shows a button that the server would refuse.
+		q = q.Where("status = ? AND approver_role = ? AND requester_id <> ?",
+			models.ApprovalStatusPending, me.Role, me.ID)
+	}
+
+	var rows []models.ApprovalRequest
+	if err := q.Preload("Decisions").Order("created_at DESC").Limit(200).Find(&rows).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not load approvals"))
+	}
+	items := []map[string]any{}
+	for _, r := range rows {
+		items = append(items, approvalJSON(r))
+	}
+	return c.JSON(http.StatusOK, map[string]any{"items": items})
+}
+
+func (h Handler) AdminGetApproval(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid approval id"))
+	}
+	var row models.ApprovalRequest
+	if err := h.DB.Preload("Decisions").First(&row, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("approval request not found"))
+	}
+	return c.JSON(http.StatusOK, approvalJSON(row))
+}
+
+// eligibleToDecide enforces the three conditions that make a vote legitimate.
+// The first return value is whether the caller may proceed; when it is false the
+// response has already been written and the caller must return the error as-is.
+//
+// It reports eligibility as a bool rather than as a non-nil error, because
+// echo's c.JSON returns nil on success — a guard written as
+// `if resp := eligible(...); resp != nil` therefore writes 403 and then falls
+// straight through to record the vote anyway. That exact bug shipped here for
+// the length of one test run.
+//
+// The self-approval check is the single most important line in this feature.
+// Without it a requester holding the approver role signs off their own
+// transaction and the whole control is theatre.
+func (h Handler) eligibleToDecide(c echo.Context, req models.ApprovalRequest, me models.User) (bool, error) {
+	if req.Status != models.ApprovalStatusPending {
+		return false, c.JSON(http.StatusConflict, errResponse("this request has already been decided"))
+	}
+	if req.RequesterID != nil && *req.RequesterID == me.ID {
+		return false, c.JSON(http.StatusForbidden, errResponse("you cannot approve your own request"))
+	}
+	// The rule named who may decide, and that snapshot travels on the request.
+	// Deliberately strict: there is no super_admin override, because a standing
+	// override is a standing bypass. A business that wants super_admin to decide
+	// configures the rule that way.
+	if me.Role != req.ApproverRole {
+		return false, c.JSON(http.StatusForbidden,
+			errResponse(fmt.Sprintf("this request must be decided by %s", req.ApproverRole)))
+	}
+	return true, nil
+}
+
+// recordDecision writes one vote. A duplicate vote from the same approver is
+// refused by the composite unique index rather than by a prior SELECT, so two
+// concurrent votes cannot both pass a check and both count toward the total.
+func (h Handler) recordDecision(req models.ApprovalRequest, me models.User, decision, reason string) error {
+	return h.DB.Create(&models.ApprovalDecision{
+		RequestID:    req.ID,
+		ApproverID:   me.ID,
+		ApproverName: me.FullName,
+		ApproverRole: me.Role,
+		Decision:     decision,
+		Reason:       reason,
+	}).Error
+}
+
+// finalise moves a request out of pending. The WHERE clause makes it a no-op for
+// a request someone else already decided, so an approve and a reject arriving
+// together resolve to whichever landed first instead of the last writer winning.
+//
+// pending_key is cleared here: it holds the (action, entity, requester)
+// composite only while a request is open, and NULLing it frees the unique slot
+// so the requester can raise a fresh request later.
+func (h Handler) finalise(reqID uuid.UUID, status string) error {
+	return h.DB.Model(&models.ApprovalRequest{}).
+		Where("id = ? AND status = ?", reqID, models.ApprovalStatusPending).
+		Updates(map[string]any{
+			"status":      status,
+			"decided_at":  time.Now(),
+			"pending_key": nil,
+		}).Error
+}
+
+// AdminApproveRequest records one approval and, once RequiredCount distinct
+// approvers have signed off, marks the request approved.
+//
+// Approving does not perform the gated action. The requester retries it and the
+// gate consumes this approval — see the note on gate for why.
+func (h Handler) AdminApproveRequest(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid approval id"))
+	}
+	me, err := h.caller(c)
+	if err != nil {
+		return c.JSON(http.StatusUnauthorized, errResponse("could not identify the caller"))
+	}
+	var row models.ApprovalRequest
+	if err := h.DB.First(&row, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("approval request not found"))
+	}
+	if ok, err := h.eligibleToDecide(c, row, me); !ok {
+		return err
+	}
+
+	var note struct {
+		Reason string `json:"reason"`
+	}
+	_ = c.Bind(&note)
+
+	if err := h.recordDecision(row, me, models.DecisionApproved, note.Reason); err != nil {
+		// The unique index is the only realistic failure here.
+		return c.JSON(http.StatusConflict, errResponse("you have already decided this request"))
+	}
+
+	var approved int64
+	h.DB.Model(&models.ApprovalDecision{}).
+		Where("request_id = ? AND decision = ?", row.ID, models.DecisionApproved).Count(&approved)
+	if int(approved) >= row.RequiredCount {
+		if err := h.finalise(row.ID, models.ApprovalStatusApproved); err != nil {
+			return c.JSON(http.StatusInternalServerError, errResponse("could not finalise the approval"))
+		}
+	}
+
+	h.DB.Preload("Decisions").First(&row, "id = ?", row.ID)
+	return c.JSON(http.StatusOK, approvalJSON(row))
+}
+
+// AdminRejectRequest refuses a request and sends it back to its originator.
+//
+// One rejection is decisive even when RequiredCount is higher: requiring every
+// approver to separately say no would leave a refused request sitting in the
+// queue looking undecided. The reason is mandatory — a rejection the requester
+// cannot act on is a dead end, and the revise-and-resubmit loop depends on it.
+func (h Handler) AdminRejectRequest(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid approval id"))
+	}
+	me, err := h.caller(c)
+	if err != nil {
+		return c.JSON(http.StatusUnauthorized, errResponse("could not identify the caller"))
+	}
+	var row models.ApprovalRequest
+	if err := h.DB.First(&row, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("approval request not found"))
+	}
+	if ok, err := h.eligibleToDecide(c, row, me); !ok {
+		return err
+	}
+
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid request body"))
+	}
+	reason := strings.TrimSpace(req.Reason)
+	if reason == "" {
+		return c.JSON(http.StatusBadRequest, errResponse("a reason is required to reject a request"))
+	}
+
+	if err := h.recordDecision(row, me, models.DecisionRejected, reason); err != nil {
+		return c.JSON(http.StatusConflict, errResponse("you have already decided this request"))
+	}
+	if err := h.finalise(row.ID, models.ApprovalStatusRejected); err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not record the rejection"))
+	}
+
+	h.DB.Preload("Decisions").First(&row, "id = ?", row.ID)
+	return c.JSON(http.StatusOK, approvalJSON(row))
+}
+
+// AdminResubmitRequest raises a fresh request in place of a rejected one, linked
+// back to it by SupersedesID so the loop reads as a chain in the history rather
+// than vanishing into a status flip.
+//
+// Only the original requester may resubmit, and the rule is re-matched rather
+// than copied: a resubmission is a new decision, and it should be measured
+// against the thresholds in force now.
+func (h Handler) AdminResubmitRequest(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid approval id"))
+	}
+	me, err := h.caller(c)
+	if err != nil {
+		return c.JSON(http.StatusUnauthorized, errResponse("could not identify the caller"))
+	}
+	var prev models.ApprovalRequest
+	if err := h.DB.First(&prev, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("approval request not found"))
+	}
+	if prev.RequesterID == nil || *prev.RequesterID != me.ID {
+		return c.JSON(http.StatusForbidden, errResponse("only the original requester can resubmit"))
+	}
+	if prev.Status != models.ApprovalStatusRejected {
+		return c.JSON(http.StatusConflict, errResponse("only a rejected request can be resubmitted"))
+	}
+
+	var body struct {
+		Summary string `json:"summary"`
+	}
+	_ = c.Bind(&body)
+	summary := strings.TrimSpace(body.Summary)
+	if summary == "" {
+		summary = prev.Summary
+	}
+
+	rule, err := h.matchRule(prev.Action, prev.Amount)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not check approval requirements"))
+	}
+	if rule == nil {
+		// The threshold moved and this no longer needs approval at all. Say so
+		// rather than raising a request nobody is required to decide.
+		return c.JSON(http.StatusConflict,
+			errResponse("this action no longer requires approval — retry it directly"))
+	}
+
+	next, err := h.raise(rule, prev.Action, prev.EntityType, prev.EntityID, prev.Amount, summary, me.ID.String())
+	if err != nil {
+		return c.JSON(http.StatusConflict, errResponse("a request for this action is already open"))
+	}
+	if err := h.DB.Model(next).Update("supersedes_id", prev.ID).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not link the resubmission"))
+	}
+	next.SupersedesID = &prev.ID
+	return c.JSON(http.StatusCreated, approvalJSON(*next))
+}

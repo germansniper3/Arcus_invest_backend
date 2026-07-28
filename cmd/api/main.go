@@ -247,6 +247,17 @@ func buildRouter(h handlers.Handler, cfg *config.Config, db *gorm.DB) *echo.Echo
 	admin.GET("/notifications/preferences", h.AdminGetNotificationPreference)
 	admin.PUT("/notifications/preferences", h.AdminSetNotificationPreference)
 
+	// Approvals (maker-checker queue for gated actions)
+	admin.GET("/approvals", h.AdminListApprovals)
+	admin.GET("/approvals/:id", h.AdminGetApproval)
+	// PATCH, not POST: deciding is an update to an existing request. A POST would
+	// need a create grant that approvers must not have, and PATCH .../approve
+	// also lands in AuditLog as "approve" rather than a generic "update".
+	admin.PATCH("/approvals/:id/approve", h.AdminApproveRequest)
+	admin.PATCH("/approvals/:id/reject", h.AdminRejectRequest)
+	// Resubmitting genuinely creates a new request, so this one is a POST.
+	admin.POST("/approvals/:id/resubmit", h.AdminResubmitRequest)
+
 	// Contracts (repository + renewal tracking)
 	admin.GET("/contracts", h.AdminListContracts)
 	admin.POST("/contracts", h.AdminCreateContract)
