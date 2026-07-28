@@ -262,6 +262,18 @@ func buildRouter(h handlers.Handler, cfg *config.Config, db *gorm.DB) *echo.Echo
 	admin.GET("/opportunities/export", h.AdminExportPipelineCSV)
 	admin.GET("/payments/export", h.AdminExportPaymentsCSV)
 
+	// Payables — the counterpart to the receivable side. Recording a supplier
+	// invoice and settling it are separately gated; see ApprovalExpenseRecord.
+	admin.GET("/expenses", h.AdminListExpenses)
+	admin.POST("/expenses", h.AdminCreateExpense)
+	admin.PUT("/expenses/:id", h.AdminUpdateExpense)
+	admin.DELETE("/expenses/:id", h.AdminDeleteExpense)
+	admin.POST("/expenses/:id/settlements", h.AdminSettleExpense)
+	admin.GET("/payables", h.AdminPayables)
+	admin.GET("/payables/export", h.AdminExportPayablesCSV)
+	// The combined cash position: owed to us, owed by us, net.
+	admin.GET("/position", h.AdminPosition)
+
 	// Notifications (personal inbox — every query is scoped to the caller)
 	admin.GET("/notifications", h.AdminListNotifications)
 	// PATCH, not POST: marking read is an update, and the notifications grant is

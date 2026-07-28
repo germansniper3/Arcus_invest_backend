@@ -53,5 +53,7 @@ func Migrate(db *gorm.DB) error {
 		&models.ApprovalRule{},
 		&models.ApprovalRequest{},
 		&models.ApprovalDecision{},
+		&models.Expense{},
+		&models.ExpenseSettlement{},
 	)
 }

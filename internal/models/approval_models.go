@@ -16,6 +16,16 @@ const (
 	ApprovalContractSign   = "contract.sign"
 	ApprovalContractDelete = "contract.delete"
 	ApprovalPaymentRecord  = "payment.record"
+
+	// Money out. ApprovalExpenseRecord gates committing the business to a
+	// liability; ApprovalExpenseSettle gates paying one.
+	//
+	// These are two separate decisions because they are made at different times
+	// by different people: a storekeeper books the supplier invoice, and someone
+	// with authority over the bank account decides when it gets paid. Gating
+	// only the first would let an approved K5,000 order be settled for K50,000.
+	ApprovalExpenseRecord = "expense.record"
+	ApprovalExpenseSettle = "expense.settle"
 )
 
 // AllApprovalActions is the enumeration the rules API validates against, so an
@@ -27,6 +37,8 @@ var AllApprovalActions = []string{
 	ApprovalContractSign,
 	ApprovalContractDelete,
 	ApprovalPaymentRecord,
+	ApprovalExpenseRecord,
+	ApprovalExpenseSettle,
 }
 
 // ApprovalRequest lifecycle.
@@ -53,6 +65,7 @@ const (
 	ApprovalEntityOpportunity = "opportunities"
 	ApprovalEntityContract    = "contracts"
 	ApprovalEntityPayment     = "payments"
+	ApprovalEntityExpense     = "expenses"
 )
 
 // ApprovalRule is one configured threshold: at or above MinAmount, Action

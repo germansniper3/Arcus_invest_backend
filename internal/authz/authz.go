@@ -54,6 +54,13 @@ const (
 	// rewrite the thresholds can neutralise the control, so rule administration
 	// must never be the softer permission of the two.
 	ResApprovals Resource = "approvals"
+	// Expenses is money out: supplier invoices and their settlements. It is a
+	// separate resource from Payments rather than sharing it, because the two
+	// carry different risk. Recording what a client paid us is a bookkeeping
+	// act; recording what we owe a supplier, and marking it paid, is the side
+	// where money leaves. A role trusted with the first is not automatically
+	// trusted with the second.
+	ResExpenses Resource = "expenses"
 )
 
 // AllResources is the enumeration used by the permissions payload and tests.
@@ -61,7 +68,7 @@ var AllResources = []Resource{
 	ResOpportunities, ResAccounts, ResContracts, ResPayments, ResQuotes,
 	ResEnrollments, ResStudents, ResEvents, ResProducts, ResUsers,
 	ResAudit, ResEmail, ResMetrics, ResRoles, ResGallery, ResNotifications,
-	ResApprovals,
+	ResApprovals, ResExpenses,
 }
 
 type Action string
@@ -147,7 +154,7 @@ var BuiltInGrants = map[models.Role]map[Resource]Grant{
 		ResStudents: full(), ResEvents: full(), ResProducts: full(),
 		ResUsers: full(), ResAudit: full(), ResEmail: full(), ResMetrics: readOnly(),
 		ResRoles: full(), ResGallery: full(), ResNotifications: ownInbox(),
-		ResApprovals: approvalDesk(),
+		ResApprovals: approvalDesk(), ResExpenses: full(),
 	},
 	models.RoleAdmin: {
 		ResOpportunities: full(), ResAccounts: full(), ResContracts: full(),
@@ -155,7 +162,7 @@ var BuiltInGrants = map[models.Role]map[Resource]Grant{
 		ResStudents: full(), ResEvents: full(), ResProducts: full(),
 		ResUsers: full(), ResAudit: full(), ResEmail: full(), ResMetrics: readOnly(),
 		ResGallery: full(), ResNotifications: ownInbox(),
-		ResApprovals: approvalDesk(),
+		ResApprovals: approvalDesk(), ResExpenses: full(),
 	},
 	models.RoleAdmissions: {
 		ResEnrollments:   full(),
@@ -378,7 +385,14 @@ var pathResources = map[string]Resource{
 	// The aged receivables report is a view over money owed, so it follows
 	// payment access rather than pipeline access — admissions has no business
 	// reading the debtor book.
-	"receivables":   ResPayments,
+	"receivables": ResPayments,
+	// Money out. The aged payables report and the combined cash position both
+	// read the expense ledger, so they follow expense access — the net position
+	// discloses what the business owes, which is the sensitive half.
+	"expenses":            ResExpenses,
+	"expense-settlements": ResExpenses,
+	"payables":            ResExpenses,
+	"position":            ResExpenses,
 	"audit-logs":    ResAudit,
 	"email":         ResEmail,
 	"metrics":       ResMetrics,
