@@ -1815,6 +1815,7 @@ func (h Handler) AdminCreateOpportunity(c echo.Context) error {
 		Notes           string            `json:"notes"`
 		Contacts        []contactRequest  `json:"contacts"`
 		LineItems       []lineItemRequest `json:"line_items"`
+		ApplyVat        bool              `json:"apply_vat"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, errResponse("invalid request body"))
@@ -1866,6 +1867,7 @@ func (h Handler) AdminCreateOpportunity(c echo.Context) error {
 		Notes:           req.Notes,
 		Contacts:        buildContacts(req.Contacts),
 		LineItems:       buildLineItems(req.LineItems),
+		ApplyVat:        req.ApplyVat,
 	}
 	if req.OwnerID != nil && *req.OwnerID != uuid.Nil {
 		opp.OwnerID = req.OwnerID
