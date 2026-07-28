@@ -439,9 +439,9 @@ func (h Handler) AdminPosition(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]any{
-		"owed_to_us":  owedToUs,
-		"owed_by_us":  owedByUs,
-		"net":         owedToUs - owedByUs,
+		"owed_to_us":        owedToUs,
+		"owed_by_us":        owedByUs,
+		"net":               owedToUs - owedByUs,
 		"spend_by_category": byCategory,
 		// Input VAT that ZRA will accept a claim for, versus VAT paid that it
 		// will not because no Smart Invoice backs the purchase. The second

@@ -285,6 +285,15 @@ func buildRouter(h handlers.Handler, cfg *config.Config, db *gorm.DB) *echo.Echo
 	// The combined cash position: owed to us, owed by us, net.
 	admin.GET("/position", h.AdminPosition)
 
+	// Walk-in selling. Deliberately separate from the deal pipeline — see the
+	// note on models.CounterSale.
+	admin.GET("/till-sessions", h.AdminListTillSessions)
+	admin.POST("/till-sessions", h.AdminOpenTill)
+	admin.GET("/till-sessions/:id", h.AdminTillSummary)
+	admin.PATCH("/till-sessions/:id/close", h.AdminCloseTill)
+	admin.GET("/counter-sales", h.AdminListCounterSales)
+	admin.POST("/counter-sales", h.AdminCreateCounterSale)
+
 	// Notifications (personal inbox — every query is scoped to the caller)
 	admin.GET("/notifications", h.AdminListNotifications)
 	// PATCH, not POST: marking read is an update, and the notifications grant is

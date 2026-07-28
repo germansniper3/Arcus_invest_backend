@@ -64,6 +64,7 @@ type StockMovement struct {
 	// What caused the movement, where there is something to point at.
 	OpportunityID *uuid.UUID `json:"opportunity_id" gorm:"type:uuid;index"`
 	ExpenseID     *uuid.UUID `json:"expense_id" gorm:"type:uuid;index"`
+	CounterSaleID *uuid.UUID `json:"counter_sale_id" gorm:"type:uuid;index"`
 
 	OccurredAt time.Time  `json:"occurred_at" gorm:"index"`
 	ActorID    *uuid.UUID `json:"actor_id" gorm:"type:uuid"`

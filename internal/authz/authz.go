@@ -61,6 +61,12 @@ const (
 	// where money leaves. A role trusted with the first is not automatically
 	// trusted with the second.
 	ResExpenses Resource = "expenses"
+	// CounterSales covers walk-in selling and the till sessions that hold it.
+	// It is its own resource because it is the one part of the system a
+	// counter operator needs and the only part they should have: someone
+	// serving customers has no business in the deal pipeline, the debtor book
+	// or the supplier ledger.
+	ResCounterSales Resource = "counter_sales"
 )
 
 // AllResources is the enumeration used by the permissions payload and tests.
@@ -68,7 +74,7 @@ var AllResources = []Resource{
 	ResOpportunities, ResAccounts, ResContracts, ResPayments, ResQuotes,
 	ResEnrollments, ResStudents, ResEvents, ResProducts, ResUsers,
 	ResAudit, ResEmail, ResMetrics, ResRoles, ResGallery, ResNotifications,
-	ResApprovals, ResExpenses,
+	ResApprovals, ResExpenses, ResCounterSales,
 }
 
 type Action string
@@ -155,6 +161,7 @@ var BuiltInGrants = map[models.Role]map[Resource]Grant{
 		ResUsers: full(), ResAudit: full(), ResEmail: full(), ResMetrics: readOnly(),
 		ResRoles: full(), ResGallery: full(), ResNotifications: ownInbox(),
 		ResApprovals: approvalDesk(), ResExpenses: full(),
+		ResCounterSales: full(),
 	},
 	models.RoleAdmin: {
 		ResOpportunities: full(), ResAccounts: full(), ResContracts: full(),
@@ -163,6 +170,7 @@ var BuiltInGrants = map[models.Role]map[Resource]Grant{
 		ResUsers: full(), ResAudit: full(), ResEmail: full(), ResMetrics: readOnly(),
 		ResGallery: full(), ResNotifications: ownInbox(),
 		ResApprovals: approvalDesk(), ResExpenses: full(),
+		ResCounterSales: full(),
 	},
 	models.RoleAdmissions: {
 		ResEnrollments:   full(),
@@ -393,6 +401,9 @@ var pathResources = map[string]Resource{
 	"expense-settlements": ResExpenses,
 	"payables":            ResExpenses,
 	"position":            ResExpenses,
+	// Walk-in selling and the shifts that contain it.
+	"counter-sales":  ResCounterSales,
+	"till-sessions":  ResCounterSales,
 	"audit-logs":    ResAudit,
 	"email":         ResEmail,
 	"metrics":       ResMetrics,

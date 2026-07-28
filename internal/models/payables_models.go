@@ -36,19 +36,19 @@ var AllVatTreatments = []string{VatStandard, VatZeroRated, VatExempt, VatNone}
 // line is what an accountant preparing those statements actually needs, and it
 // is what a storekeeper can be expected to pick correctly.
 const (
-	ExpPurchases    = "purchases"     // goods for resale — the cost of sales line
-	ExpSalaries     = "salaries"      // wages, PAYE, NAPSA
-	ExpRent         = "rent"          // premises
-	ExpUtilities    = "utilities"     // ZESCO, water, internet, airtime
-	ExpTransport    = "transport"     // fuel, freight, vehicle running
-	ExpRepairs      = "repairs"       // maintenance of premises, tools, vehicles
-	ExpProfessional = "professional"  // accountancy, legal, consultancy
-	ExpBankCharges  = "bank_charges"  // bank and mobile money fees
-	ExpMarketing    = "marketing"     // advertising, signage
-	ExpInsurance    = "insurance"     //
-	ExpStatutory    = "statutory"     // licences, levies, council fees, ZRA penalties
-	ExpEquipment    = "equipment"     // tools and plant bought outright
-	ExpOther        = "other"         //
+	ExpPurchases    = "purchases"    // goods for resale — the cost of sales line
+	ExpSalaries     = "salaries"     // wages, PAYE, NAPSA
+	ExpRent         = "rent"         // premises
+	ExpUtilities    = "utilities"    // ZESCO, water, internet, airtime
+	ExpTransport    = "transport"    // fuel, freight, vehicle running
+	ExpRepairs      = "repairs"      // maintenance of premises, tools, vehicles
+	ExpProfessional = "professional" // accountancy, legal, consultancy
+	ExpBankCharges  = "bank_charges" // bank and mobile money fees
+	ExpMarketing    = "marketing"    // advertising, signage
+	ExpInsurance    = "insurance"    //
+	ExpStatutory    = "statutory"    // licences, levies, council fees, ZRA penalties
+	ExpEquipment    = "equipment"    // tools and plant bought outright
+	ExpOther        = "other"        //
 )
 
 var AllExpenseCategories = []string{
