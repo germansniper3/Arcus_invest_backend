@@ -257,6 +257,11 @@ func buildRouter(h handlers.Handler, cfg *config.Config, db *gorm.DB) *echo.Echo
 	admin.PATCH("/approvals/:id/reject", h.AdminRejectRequest)
 	// Resubmitting genuinely creates a new request, so this one is a POST.
 	admin.POST("/approvals/:id/resubmit", h.AdminResubmitRequest)
+	// The thresholds share the approvals resource: anyone able to rewrite them
+	// can neutralise the control, so this must not be the softer permission.
+	admin.GET("/approval-rules", h.AdminListApprovalRules)
+	admin.POST("/approval-rules", h.AdminCreateApprovalRule)
+	admin.PATCH("/approval-rules/:id", h.AdminUpdateApprovalRule)
 
 	// Contracts (repository + renewal tracking)
 	admin.GET("/contracts", h.AdminListContracts)

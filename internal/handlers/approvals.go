@@ -216,6 +216,150 @@ func (h Handler) blockedResponse(c echo.Context, req *models.ApprovalRequest) er
 func zmw(amount float64) string { return "ZMW " + money(amount) }
 
 // ---------------------------------------------------------------------------
+// Rules
+// ---------------------------------------------------------------------------
+
+func approvalRuleJSON(r models.ApprovalRule) map[string]any {
+	return map[string]any{
+		"id": r.ID, "created_at": r.CreatedAt, "action": r.Action,
+		"min_amount": r.MinAmount, "required_count": r.RequiredCount,
+		"approver_role": r.ApproverRole, "is_active": r.IsActive, "note": r.Note,
+	}
+}
+
+var validApprovalActions = func() map[string]bool {
+	m := make(map[string]bool, len(models.AllApprovalActions))
+	for _, a := range models.AllApprovalActions {
+		m[a] = true
+	}
+	return m
+}()
+
+// validateRule rejects a rule that could never be satisfied.
+//
+// The approver-role checks matter more than they look: a rule naming a role
+// that does not exist, or one that cannot decide approvals, blocks its action
+// permanently with nobody able to release it. That failure would present as
+// "the app is broken", days after someone saved a typo in a settings screen.
+func (h Handler) validateRule(c echo.Context, action string, minAmount float64, required int, role models.Role) (bool, error) {
+	if !validApprovalActions[action] {
+		return false, c.JSON(http.StatusBadRequest, errResponse("unknown approval action"))
+	}
+	if minAmount < 0 {
+		return false, c.JSON(http.StatusBadRequest, errResponse("minimum amount cannot be negative"))
+	}
+	if required < 1 {
+		return false, c.JSON(http.StatusBadRequest, errResponse("a rule must require at least one approval"))
+	}
+	var exists int64
+	h.DB.Model(&models.CustomRole{}).Where("name = ?", string(role)).Count(&exists)
+	if exists == 0 {
+		return false, c.JSON(http.StatusBadRequest,
+			errResponse(fmt.Sprintf("no role named %q exists", role)))
+	}
+	if !authz.Can(role, authz.ResApprovals, authz.ActionUpdate) {
+		return false, c.JSON(http.StatusBadRequest, errResponse(fmt.Sprintf(
+			"%s cannot decide approvals, so a rule naming it would block this action permanently", role)))
+	}
+	return true, nil
+}
+
+func (h Handler) AdminListApprovalRules(c echo.Context) error {
+	var rows []models.ApprovalRule
+	if err := h.DB.Order("action ASC, min_amount ASC").Find(&rows).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not load approval rules"))
+	}
+	items := []map[string]any{}
+	for _, r := range rows {
+		items = append(items, approvalRuleJSON(r))
+	}
+	return c.JSON(http.StatusOK, map[string]any{"items": items})
+}
+
+func (h Handler) AdminCreateApprovalRule(c echo.Context) error {
+	var req struct {
+		Action        string  `json:"action"`
+		MinAmount     float64 `json:"min_amount"`
+		RequiredCount int     `json:"required_count"`
+		ApproverRole  string  `json:"approver_role"`
+		Note          string  `json:"note"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid request body"))
+	}
+	if req.RequiredCount == 0 {
+		req.RequiredCount = 1
+	}
+	role := models.Role(strings.TrimSpace(req.ApproverRole))
+	if ok, err := h.validateRule(c, req.Action, req.MinAmount, req.RequiredCount, role); !ok {
+		return err
+	}
+	rule := models.ApprovalRule{
+		Action: req.Action, MinAmount: req.MinAmount, RequiredCount: req.RequiredCount,
+		ApproverRole: role, IsActive: true, Note: strings.TrimSpace(req.Note),
+	}
+	if err := h.DB.Create(&rule).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not create the rule"))
+	}
+	return c.JSON(http.StatusCreated, approvalRuleJSON(rule))
+}
+
+// AdminUpdateApprovalRule edits a rule. In-flight requests are unaffected: they
+// carry their own snapshot of RequiredCount and ApproverRole, so raising a
+// threshold cannot auto-approve what is already pending and lowering one cannot
+// invalidate approvals already given.
+func (h Handler) AdminUpdateApprovalRule(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid rule id"))
+	}
+	var rule models.ApprovalRule
+	if err := h.DB.First(&rule, "id = ?", id).Error; err != nil {
+		return c.JSON(http.StatusNotFound, errResponse("rule not found"))
+	}
+	var req struct {
+		MinAmount     *float64 `json:"min_amount"`
+		RequiredCount *int     `json:"required_count"`
+		ApproverRole  *string  `json:"approver_role"`
+		IsActive      *bool    `json:"is_active"`
+		Note          *string  `json:"note"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid request body"))
+	}
+
+	next := rule
+	if req.MinAmount != nil {
+		next.MinAmount = *req.MinAmount
+	}
+	if req.RequiredCount != nil {
+		next.RequiredCount = *req.RequiredCount
+	}
+	if req.ApproverRole != nil {
+		next.ApproverRole = models.Role(strings.TrimSpace(*req.ApproverRole))
+	}
+	if ok, verr := h.validateRule(c, next.Action, next.MinAmount, next.RequiredCount, next.ApproverRole); !ok {
+		return verr
+	}
+
+	updates := map[string]any{
+		"min_amount": next.MinAmount, "required_count": next.RequiredCount,
+		"approver_role": next.ApproverRole,
+	}
+	if req.IsActive != nil {
+		updates["is_active"] = *req.IsActive
+	}
+	if req.Note != nil {
+		updates["note"] = strings.TrimSpace(*req.Note)
+	}
+	if err := h.DB.Model(&rule).Updates(updates).Error; err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not update the rule"))
+	}
+	h.DB.First(&rule, "id = ?", id)
+	return c.JSON(http.StatusOK, approvalRuleJSON(rule))
+}
+
+// ---------------------------------------------------------------------------
 // Decisions
 // ---------------------------------------------------------------------------
 
@@ -352,15 +496,24 @@ func (h Handler) eligibleToDecide(c echo.Context, req models.ApprovalRequest, me
 // recordDecision writes one vote. A duplicate vote from the same approver is
 // refused by the composite unique index rather than by a prior SELECT, so two
 // concurrent votes cannot both pass a check and both count toward the total.
+//
+// The insert is wrapped in its own transaction because that rejection is an
+// EXPECTED outcome, not a fault. On Postgres a constraint violation aborts the
+// surrounding transaction and every later statement on that connection fails
+// with 25P02 — so without this, handling the duplicate gracefully still leaves
+// the connection unusable. GORM turns this into a SAVEPOINT when a transaction
+// is already open and a trivial one when it is not.
 func (h Handler) recordDecision(req models.ApprovalRequest, me models.User, decision, reason string) error {
-	return h.DB.Create(&models.ApprovalDecision{
-		RequestID:    req.ID,
-		ApproverID:   me.ID,
-		ApproverName: me.FullName,
-		ApproverRole: me.Role,
-		Decision:     decision,
-		Reason:       reason,
-	}).Error
+	return h.DB.Transaction(func(tx *gorm.DB) error {
+		return tx.Create(&models.ApprovalDecision{
+			RequestID:    req.ID,
+			ApproverID:   me.ID,
+			ApproverName: me.FullName,
+			ApproverRole: me.Role,
+			Decision:     decision,
+			Reason:       reason,
+		}).Error
+	})
 }
 
 // finalise moves a request out of pending. The WHERE clause makes it a no-op for

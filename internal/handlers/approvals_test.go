@@ -21,6 +21,10 @@ import (
 // because its tests called InvoicedTotal directly and never traversed the
 // handler, so the create path went unwired without anything failing.
 
+// testDB hands back a transaction that is rolled back when the test ends, so a
+// run leaves the database exactly as it found it. The suite shares one database
+// with real dev data; committing test rows into it is how a "why is this deal
+// closed?" mystery starts.
 func testDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	dsn := os.Getenv("DATABASE_URL")
@@ -34,7 +38,26 @@ func testDB(t *testing.T) *gorm.DB {
 	if err := database.Migrate(db); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	return db
+	tx := db.Begin()
+	if tx.Error != nil {
+		t.Fatalf("begin: %v", tx.Error)
+	}
+	t.Cleanup(func() { tx.Rollback() })
+	return tx
+}
+
+// clearRules removes every rule for one action inside the test transaction.
+//
+// Rolling back isolates what a test WRITES, not what it READS: a rule an
+// operator has genuinely configured in the dev database is committed data and
+// still matches. Without this, whether these tests pass depends on how the
+// local system happens to be configured — which is how a suite starts failing
+// for reasons that have nothing to do with the code.
+func clearRules(t *testing.T, db *gorm.DB, action string) {
+	t.Helper()
+	if err := db.Unscoped().Where("action = ?", action).Delete(&models.ApprovalRule{}).Error; err != nil {
+		t.Fatalf("clear rules for %s: %v", action, err)
+	}
 }
 
 // fixtureUser creates a throwaway staff account. Real accounts live in this
@@ -54,8 +77,11 @@ func fixtureUser(t *testing.T, db *gorm.DB, role models.Role) models.User {
 	return u
 }
 
+// fixtureRule installs the ONLY rule for its action, so a test measures its own
+// threshold rather than whichever pre-existing rule happens to sort first.
 func fixtureRule(t *testing.T, db *gorm.DB, action string, minAmount float64, required int, approver models.Role) models.ApprovalRule {
 	t.Helper()
+	clearRules(t, db, action)
 	r := models.ApprovalRule{
 		Action: action, MinAmount: minAmount, RequiredCount: required,
 		ApproverRole: approver, IsActive: true,
@@ -63,7 +89,6 @@ func fixtureRule(t *testing.T, db *gorm.DB, action string, minAmount float64, re
 	if err := db.Create(&r).Error; err != nil {
 		t.Fatalf("create fixture rule: %v", err)
 	}
-	t.Cleanup(func() { db.Unscoped().Delete(&models.ApprovalRule{}, "id = ?", r.ID) })
 	return r
 }
 
@@ -439,6 +464,67 @@ func TestRejectionBlocksRetryUntilResubmitted(t *testing.T) {
 	}
 	if next.Summary != "Revised: discount removed" {
 		t.Errorf("summary = %q, want the revised text", next.Summary)
+	}
+}
+
+// TestRuleValidationRefusesUnsatisfiableRules covers the footgun that would
+// otherwise present as "the app is broken" days later: a rule naming a role
+// that does not exist, or one that cannot decide approvals, blocks its action
+// permanently with nobody able to release it.
+func TestRuleValidationRefusesUnsatisfiableRules(t *testing.T) {
+	db := testDB(t)
+	h := Handler{DB: db}
+	e := echo.New()
+	actor := fixtureUser(t, db, models.RoleSuperAdmin)
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"unknown action", `{"action":"deal.explode","min_amount":1,"required_count":1,"approver_role":"super_admin"}`},
+		{"nonexistent role", `{"action":"deal.close_won","min_amount":1,"required_count":1,"approver_role":"wizard"}`},
+		{"role that cannot decide", `{"action":"deal.close_won","min_amount":1,"required_count":1,"approver_role":"admissions"}`},
+		{"zero approvals required", `{"action":"deal.close_won","min_amount":1,"required_count":-1,"approver_role":"super_admin"}`},
+		{"negative threshold", `{"action":"deal.close_won","min_amount":-5,"required_count":1,"approver_role":"super_admin"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := adminCtx(e, http.MethodPost, tc.body, actor)
+			c.SetPath("/api/v1/admin/approval-rules")
+			if err := h.AdminCreateApprovalRule(c); err != nil {
+				t.Fatalf("AdminCreateApprovalRule: %v", err)
+			}
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestCreateValidRuleSucceeds is the counterpart: the validation above must not
+// be so strict that a legitimate rule cannot be saved.
+func TestCreateValidRuleSucceeds(t *testing.T) {
+	db := testDB(t)
+	h := Handler{DB: db}
+	e := echo.New()
+	actor := fixtureUser(t, db, models.RoleSuperAdmin)
+
+	c, rec := adminCtx(e, http.MethodPost,
+		`{"action":"contract.sign","min_amount":250000,"required_count":2,"approver_role":"super_admin","note":"board sign-off"}`, actor)
+	c.SetPath("/api/v1/admin/approval-rules")
+	if err := h.AdminCreateApprovalRule(c); err != nil {
+		t.Fatalf("AdminCreateApprovalRule: %v", err)
+	}
+	t.Cleanup(func() { db.Unscoped().Delete(&models.ApprovalRule{}, "note = ?", "board sign-off") })
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
+	}
+	var saved models.ApprovalRule
+	if err := db.Where("note = ?", "board sign-off").First(&saved).Error; err != nil {
+		t.Fatalf("rule not persisted: %v", err)
+	}
+	if !saved.IsActive {
+		t.Error("a newly created rule should be active")
 	}
 }
 
@@ -906,6 +992,7 @@ func TestCreateAtWonAllowedWithoutRule(t *testing.T) {
 	e := echo.New()
 
 	actor := fixtureUser(t, db, models.RoleAdmin)
+	clearRules(t, db, models.ApprovalDealCloseWon)
 	name := "Historic won " + uuid.NewString()
 	body := `{"name":"` + name + `","deal_value":900000,"stage":"won"}`
 	c, rec := adminCtx(e, http.MethodPost, body, actor)
