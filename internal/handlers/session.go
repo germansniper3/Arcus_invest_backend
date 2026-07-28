@@ -2,7 +2,10 @@ package handlers
 
 import (
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"arcusinvest/internal/config"
@@ -97,6 +100,77 @@ func (h Handler) Logout(c echo.Context) error {
 	}
 	clearRefreshCookie(c)
 	return c.JSON(http.StatusOK, map[string]any{"message": "signed out"})
+}
+
+// ForgotPassword emails a reset link, and says nothing about whether the address
+// belongs to an account.
+//
+// The response is identical either way — same status, same body, and the email
+// is sent in the background so the timing does not differ either. The invitation
+// preview endpoint deliberately distinguishes 404 from 410, which is right there
+// because the caller already holds the token; copying it here would turn this
+// into a way to ask "does this person bank with you?" one address at a time.
+func (h Handler) ForgotPassword(c echo.Context) error {
+	var req struct {
+		Email string `json:"email"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid request body"))
+	}
+
+	sameAnswer := map[string]any{
+		"message": "If that address has an account, a reset link is on its way.",
+	}
+
+	user, raw, created, err := services.CreatePasswordReset(h.DB, req.Email, c.RealIP())
+	if err != nil {
+		c.Logger().Errorf("could not create password reset: %v", err)
+		return c.JSON(http.StatusOK, sameAnswer)
+	}
+	if !created {
+		return c.JSON(http.StatusOK, sameAnswer)
+	}
+
+	resetURL := fmt.Sprintf("%s/reset-password?token=%s",
+		strings.TrimRight(h.Cfg.FrontendURL, "/"), raw)
+	expires := time.Now().Add(services.PasswordResetTTL)
+
+	// Sent off the request path deliberately. Delivering inline would make the
+	// known-address case measurably slower than the unknown one — the identical
+	// body would still be handed over by a stopwatch. The goroutine takes only
+	// values, nothing tied to the request, so it is safe after this returns.
+	//
+	// A delivery failure is logged rather than surfaced, for the same reason:
+	// an error the caller can see is an answer the caller can use.
+	go func(to, name string) {
+		if err := services.SendPasswordResetEmail(h.Cfg, to, name, resetURL, expires); err != nil {
+			log.Printf("WARN: could not send password reset email to %s: %v", to, err)
+		}
+	}(user.Email, user.FullName)
+
+	return c.JSON(http.StatusOK, sameAnswer)
+}
+
+// ResetPassword redeems a reset link and signs the user out everywhere.
+func (h Handler) ResetPassword(c echo.Context) error {
+	var req struct {
+		Token    string `json:"token"`
+		Password string `json:"password"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid request body"))
+	}
+	if _, err := services.ConsumePasswordReset(h.DB, req.Token, req.Password); err != nil {
+		// A rejected link and a too-short password are both the caller's to fix,
+		// and both messages are safe to show: neither reveals whether an account
+		// exists, only whether this particular link is still good.
+		return c.JSON(http.StatusBadRequest, errResponse(err.Error()))
+	}
+	// Whatever session this browser had is gone along with the rest.
+	clearRefreshCookie(c)
+	return c.JSON(http.StatusOK, map[string]any{
+		"message": "Password updated. Sign in with your new password.",
+	})
 }
 
 // LogoutEverywhere revokes every session this user has, on every device, and

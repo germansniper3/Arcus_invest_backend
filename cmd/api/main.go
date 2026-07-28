@@ -130,6 +130,12 @@ func buildRouter(h handlers.Handler, cfg *config.Config, db *gorm.DB) *echo.Echo
 	// token has usually already expired.
 	api.POST("/auth/refresh", h.Refresh, rateLimiter(60))
 	api.POST("/auth/logout", h.Logout, rateLimiter(30))
+	// Tighter budgets than the other public POSTs. The limiter is per-process
+	// and in-memory, so with more than one replica it is a speed bump rather
+	// than the control — the real anti-enumeration defence is that the response
+	// never varies.
+	api.POST("/auth/forgot-password", h.ForgotPassword, rateLimiter(5))
+	api.POST("/auth/reset-password", h.ResetPassword, rateLimiter(10))
 	api.POST("/enrollments", h.CreateEnrollment, rateLimiter(20))
 	api.POST("/quotes", h.CreateQuote, rateLimiter(20))
 	api.POST("/chat", h.Chat, rateLimiter(20))

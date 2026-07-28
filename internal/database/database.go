@@ -49,6 +49,7 @@ func Migrate(db *gorm.DB) error {
 		&models.CustomRole{},
 		&models.CustomRolePermission{},
 		&models.RefreshToken{},
+		&models.PasswordResetToken{},
 		&models.ApprovalRule{},
 		&models.ApprovalRequest{},
 		&models.ApprovalDecision{},

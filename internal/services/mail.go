@@ -231,6 +231,28 @@ func SendInvitationEmail(cfg *config.Config, to, fullName, tier, claimURL string
 	return sendMail(cfg, []string{to}, to, "Your Arcus Innovation Hub onboarding link", body)
 }
 
+// SendPasswordResetEmail emails a single-use link for setting a new password.
+//
+// The wording assumes the recipient may not have asked for this, because anyone
+// can type someone else's address into the form. It says what will happen if
+// they ignore it — nothing — rather than implying an account was compromised.
+func SendPasswordResetEmail(cfg *config.Config, to, fullName, resetURL string, expires time.Time) error {
+	greeting := "Hello"
+	if n := strings.TrimSpace(fullName); n != "" {
+		greeting = "Hello " + n
+	}
+	body := fmt.Sprintf(
+		"%s,\r\n\r\nSomeone asked to reset the password for your Arcus Investments account. "+
+			"If that was you, use the link below to choose a new one:\r\n\r\n%s\r\n\r\n"+
+			"This link can be used once and expires at %s. Setting a new password signs you out "+
+			"everywhere else.\r\n\r\n"+
+			"If it was not you, no action is needed — your password has not changed and this link "+
+			"will expire on its own.\r\n\r\n— Arcus Investments\r\n",
+		greeting, resetURL, expires.Format("15:04 on 2 January 2006"),
+	)
+	return sendMail(cfg, []string{to}, to, "Reset your Arcus Investments password", body)
+}
+
 // SendBroadcastEmail sends a single message to many recipients without leaking
 // the recipient list in the message headers: recipients are supplied only in
 // the SMTP envelope (RCPT TO), i.e. BCC-style. The visible To header is the

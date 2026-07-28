@@ -101,6 +101,23 @@ type OnboardingInvitation struct {
 	Status       string    `json:"status" gorm:"not null;default:'pending'"` // pending, claimed, expired
 }
 
+// PasswordResetToken is a single-use, short-lived permit to set a new password
+// without knowing the old one.
+//
+// Hashed at rest for the same reason as RefreshToken: while it is live it is
+// equivalent to the account itself, so a database dump must not contain usable
+// ones. The expiry is deliberately much shorter than an invitation's — an
+// invitation is expected to sit in an inbox for days, whereas a reset is acted
+// on within minutes of being requested.
+type PasswordResetToken struct {
+	BaseModel
+	UserID    uuid.UUID  `json:"user_id" gorm:"type:uuid;index;not null"`
+	TokenHash string     `json:"-" gorm:"uniqueIndex;not null"`
+	ExpiresAt time.Time  `json:"expires_at" gorm:"index;not null"`
+	UsedAt    *time.Time `json:"used_at"`
+	RequestIP string     `json:"request_ip"`
+}
+
 // RefreshToken is one link in a rotation chain. Presenting it returns a fresh
 // access token and replaces this row with a successor in the same family.
 //
