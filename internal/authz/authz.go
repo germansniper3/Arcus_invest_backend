@@ -49,6 +49,11 @@ const (
 	// Notifications are personal: a caller only ever sees their own, so this
 	// grant is ScopeOwn and the handlers filter by user_id regardless.
 	ResNotifications Resource = "notifications"
+	// Approvals covers both the maker-checker request queue and the threshold
+	// rules that drive it. They share one resource deliberately: anyone who can
+	// rewrite the thresholds can neutralise the control, so rule administration
+	// must never be the softer permission of the two.
+	ResApprovals Resource = "approvals"
 )
 
 // AllResources is the enumeration used by the permissions payload and tests.
@@ -56,6 +61,7 @@ var AllResources = []Resource{
 	ResOpportunities, ResAccounts, ResContracts, ResPayments, ResQuotes,
 	ResEnrollments, ResStudents, ResEvents, ResProducts, ResUsers,
 	ResAudit, ResEmail, ResMetrics, ResRoles, ResGallery, ResNotifications,
+	ResApprovals,
 }
 
 type Action string
@@ -114,6 +120,17 @@ func ownInbox() Grant {
 	}
 }
 
+// approvalDesk is read, raise and decide over every request — an approver must
+// see other people's requests, so this is ScopeAll rather than an inbox. Delete
+// is deliberately absent: an approval request is the evidence that an action was
+// authorised, and evidence nobody can erase is the entire point.
+func approvalDesk() Grant {
+	return Grant{
+		Actions: map[Action]bool{ActionRead: true, ActionCreate: true, ActionUpdate: true},
+		Scope:   ScopeAll,
+	}
+}
+
 // BuiltInGrants is the canonical grant set for built-in roles. It is exported
 // so seed.Roles() can write it to the database and tests can verify the seeded
 // data matches the hardcoded truth exactly. Do NOT duplicate this data — read
@@ -130,6 +147,7 @@ var BuiltInGrants = map[models.Role]map[Resource]Grant{
 		ResStudents: full(), ResEvents: full(), ResProducts: full(),
 		ResUsers: full(), ResAudit: full(), ResEmail: full(), ResMetrics: readOnly(),
 		ResRoles: full(), ResGallery: full(), ResNotifications: ownInbox(),
+		ResApprovals: approvalDesk(),
 	},
 	models.RoleAdmin: {
 		ResOpportunities: full(), ResAccounts: full(), ResContracts: full(),
@@ -137,6 +155,7 @@ var BuiltInGrants = map[models.Role]map[Resource]Grant{
 		ResStudents: full(), ResEvents: full(), ResProducts: full(),
 		ResUsers: full(), ResAudit: full(), ResEmail: full(), ResMetrics: readOnly(),
 		ResGallery: full(), ResNotifications: ownInbox(),
+		ResApprovals: approvalDesk(),
 	},
 	models.RoleAdmissions: {
 		ResEnrollments:   full(),
@@ -366,6 +385,10 @@ var pathResources = map[string]Resource{
 	"roles":         ResRoles,
 	"gallery":       ResGallery,
 	"notifications": ResNotifications,
+	"approvals":     ResApprovals,
+	// The thresholds are part of the same control surface as the queue they
+	// gate — see the ResApprovals comment for why they must not be separable.
+	"approval-rules": ResApprovals,
 }
 
 // ResourceForPath derives the resource a matched admin route acts on. The second

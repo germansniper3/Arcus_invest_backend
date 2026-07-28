@@ -141,6 +141,22 @@ func TestAdminsKeepFullAccess(t *testing.T) {
 				}
 				continue
 			}
+			// An approval request is the evidence that a gated action was
+			// authorised. Read/create/update cover raising, deciding and
+			// resubmitting; delete is withheld from every built-in role so that
+			// evidence cannot be erased by the same people it constrains. This is
+			// a new resource, so withholding it reduces no existing access.
+			if res == ResApprovals {
+				for _, act := range []Action{ActionRead, ActionCreate, ActionUpdate} {
+					if !Can(role, res, act) {
+						t.Errorf("%s should %s approvals", role, act)
+					}
+				}
+				if Can(role, res, ActionDelete) {
+					t.Errorf("%s should NOT delete approvals — they are the audit evidence for gated actions", role)
+				}
+				continue
+			}
 			for _, act := range []Action{ActionCreate, ActionUpdate, ActionDelete} {
 				if !Can(role, res, act) {
 					t.Errorf("%s should %s %s", role, act, res)
@@ -157,6 +173,10 @@ func TestAdmissionsIsConfinedToIntake(t *testing.T) {
 	denied := []Resource{
 		ResOpportunities, ResAccounts, ResContracts, ResPayments, ResQuotes,
 		ResUsers, ResAudit, ResEmail, ResRoles,
+		// Approvals gate deals, contracts and payments — none of which admissions
+		// can reach — so the approval queue must be closed to it too. Otherwise
+		// admissions could approve a transaction on a record it cannot even read.
+		ResApprovals,
 	}
 	for _, res := range denied {
 		for _, act := range AllActions {

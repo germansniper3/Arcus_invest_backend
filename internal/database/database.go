@@ -48,5 +48,8 @@ func Migrate(db *gorm.DB) error {
 		&models.AuditLog{},
 		&models.CustomRole{},
 		&models.CustomRolePermission{},
+		&models.ApprovalRule{},
+		&models.ApprovalRequest{},
+		&models.ApprovalDecision{},
 	)
 }
