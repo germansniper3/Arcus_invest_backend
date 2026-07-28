@@ -101,6 +101,29 @@ type OnboardingInvitation struct {
 	Status       string    `json:"status" gorm:"not null;default:'pending'"` // pending, claimed, expired
 }
 
+// RefreshToken is one link in a rotation chain. Presenting it returns a fresh
+// access token and replaces this row with a successor in the same family.
+//
+// Only the SHA256 of the issued value is stored. This deliberately departs from
+// OnboardingInvitation, which keeps its token in plaintext: an invitation grants
+// one account setup, whereas a leaked refresh token is a live session, and a
+// database dump must not hand those over.
+type RefreshToken struct {
+	BaseModel
+	UserID    uuid.UUID `json:"user_id" gorm:"type:uuid;index;not null"`
+	TokenHash string    `json:"-" gorm:"uniqueIndex;not null"`
+	// FamilyID ties one chain of rotations together. If a token is ever
+	// presented twice, the safe reading is that someone else has a copy, so the
+	// entire family is revoked rather than just that link.
+	FamilyID  uuid.UUID  `json:"family_id" gorm:"type:uuid;index;not null"`
+	ExpiresAt time.Time  `json:"expires_at" gorm:"index;not null"`
+	UsedAt    *time.Time `json:"used_at"`
+	RevokedAt *time.Time `json:"revoked_at"`
+	// Captured to make a stolen-token report investigable after the fact.
+	IP        string `json:"ip"`
+	UserAgent string `json:"user_agent"`
+}
+
 type Event struct {
 	BaseModel
 	Title        string    `json:"title" gorm:"not null"`

@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 )
@@ -124,11 +125,46 @@ func (c *Config) MailTransport() string {
 	return "none"
 }
 
+// TokenTTLHours is superseded by AccessTokenTTL and is no longer used to issue
+// anything. It remains only so LegacyTokenTTLSet can warn an operator whose
+// environment still sets JWT_TTL_HOURS that the value is being ignored.
+//
+// Deprecated: use AccessTokenTTL.
 func TokenTTLHours() int {
 	raw := get("JWT_TTL_HOURS", "12")
 	v, err := strconv.Atoi(raw)
 	if err != nil || v <= 0 {
 		return 12
+	}
+	return v
+}
+
+// LegacyTokenTTLSet reports whether JWT_TTL_HOURS is still configured. Silently
+// ignoring a setting an operator deliberately chose is how a system develops a
+// reputation for not doing what it is told.
+func LegacyTokenTTLSet() bool { return os.Getenv("JWT_TTL_HOURS") != "" }
+
+// AccessTokenTTL is how long a bearer token is good for.
+//
+// Short by design: with refresh tokens carrying the session, an access token
+// only has to survive a burst of requests. Its lifetime is the window in which
+// a stolen token is useful, and the window in which a revocation has not yet
+// taken effect for a caller who is not making requests.
+func AccessTokenTTL() time.Duration {
+	return time.Duration(positiveInt("ACCESS_TOKEN_TTL_MINUTES", 30)) * time.Minute
+}
+
+// RefreshTokenTTL is the longest a session can survive without re-entering a
+// password. Rotation means the stored token changes constantly; this bounds the
+// chain, not any single token.
+func RefreshTokenTTL() time.Duration {
+	return time.Duration(positiveInt("REFRESH_TOKEN_TTL_DAYS", 30)) * 24 * time.Hour
+}
+
+func positiveInt(key string, fallback int) int {
+	v, err := strconv.Atoi(get(key, ""))
+	if err != nil || v <= 0 {
+		return fallback
 	}
 	return v
 }

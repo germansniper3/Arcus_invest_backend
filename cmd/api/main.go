@@ -43,6 +43,12 @@ func main() {
 	if err := database.Migrate(db); err != nil {
 		log.Fatal(err)
 	}
+	if config.LegacyTokenTTLSet() {
+		log.Printf("WARN: JWT_TTL_HOURS is set but no longer used. Access tokens now last "+
+			"ACCESS_TOKEN_TTL_MINUTES (%s) and sessions are carried by refresh tokens for "+
+			"REFRESH_TOKEN_TTL_DAYS (%s). Remove JWT_TTL_HOURS to silence this.",
+			config.AccessTokenTTL(), config.RefreshTokenTTL())
+	}
 	if err := seed.Roles(db); err != nil {
 		log.Fatal(err)
 	}
@@ -105,6 +111,10 @@ func buildRouter(h handlers.Handler, cfg *config.Config, db *gorm.DB) *echo.Echo
 		AllowOrigins: cfg.CORSOrigins,
 		AllowMethods: []string{echo.GET, echo.POST, echo.PUT, echo.PATCH, echo.DELETE, echo.OPTIONS},
 		AllowHeaders: []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization},
+		// Required for the refresh cookie to cross from the frontend origin to
+		// this one. Safe only because AllowOrigins is an explicit allowlist —
+		// browsers refuse credentials against a wildcard, and so should we.
+		AllowCredentials: true,
 	}))
 
 	api := e.Group("/api/v1")
@@ -115,6 +125,11 @@ func buildRouter(h handlers.Handler, cfg *config.Config, db *gorm.DB) *echo.Echo
 	// ── Public ──────────────────────────────────────────────────────────────
 	api.GET("/health", h.Health)
 	api.POST("/auth/login", h.Login, rateLimiter(10))
+	// Refresh and logout are public because they authenticate with the refresh
+	// cookie, not a bearer token — by the time refresh is needed, the access
+	// token has usually already expired.
+	api.POST("/auth/refresh", h.Refresh, rateLimiter(60))
+	api.POST("/auth/logout", h.Logout, rateLimiter(30))
 	api.POST("/enrollments", h.CreateEnrollment, rateLimiter(20))
 	api.POST("/quotes", h.CreateQuote, rateLimiter(20))
 	api.POST("/chat", h.Chat, rateLimiter(20))
@@ -141,6 +156,9 @@ func buildRouter(h handlers.Handler, cfg *config.Config, db *gorm.DB) *echo.Echo
 	protected := api.Group("")
 	protected.Use(appmw.Auth(cfg, db))
 	protected.GET("/auth/me", h.Me)
+	// Requires a live token: ending every session everywhere is a decision only
+	// the account holder should be able to make.
+	protected.POST("/auth/logout-everywhere", h.LogoutEverywhere)
 	protected.POST("/chat/authenticated", h.Chat)
 
 	// ── Student Hub ──────────────────────────────────────────────────────────

@@ -43,6 +43,15 @@ func (h Handler) Login(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, errResponse(err.Error()))
 	}
+	// Each sign-in starts its own refresh family, so revoking one device leaves
+	// the others alone. Best-effort: failing to mint a refresh token should not
+	// deny a correct password — the caller simply gets a session that ends when
+	// the access token does.
+	if raw, rerr := services.IssueRefreshToken(h.DB, user.ID, c.RealIP(), c.Request().UserAgent()); rerr == nil {
+		setRefreshCookie(c, raw)
+	} else {
+		c.Logger().Errorf("could not issue refresh token for %s: %v", user.ID, rerr)
+	}
 	// Permissions must be included here as well as on /auth/me: the client stores
 	// this user object straight after login, and a payload without them would make
 	// the UI fall back to a coarse role guess.

@@ -54,7 +54,7 @@ func IssueToken(cfg *config.Config, user models.User) (string, error) {
 		TokenVersion: user.TokenVersion,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   user.ID.String(),
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Duration(config.TokenTTLHours()) * time.Hour)),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(config.AccessTokenTTL())),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 		},
 	}
