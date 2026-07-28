@@ -39,12 +39,18 @@ func Auth(cfg *config.Config, db *gorm.DB) echo.MiddlewareFunc {
 			// Soft-deleted users are excluded by the default GORM scope, so a
 			// deleted account fails here too.
 			var user models.User
-			if err := db.Select("id", "email", "role", "is_active").
+			if err := db.Select("id", "email", "role", "is_active", "token_version").
 				First(&user, "id = ?", claims.UserID).Error; err != nil {
 				return echo.NewHTTPError(http.StatusUnauthorized, "account no longer exists")
 			}
 			if !user.IsActive {
 				return echo.NewHTTPError(http.StatusForbidden, "account is disabled")
+			}
+			// Revocation. A password reset or an explicit "sign out everywhere"
+			// moves the user's token version on, stranding every token minted
+			// before it. Free to check: the row was already being read.
+			if claims.TokenVersion != user.TokenVersion {
+				return echo.NewHTTPError(http.StatusUnauthorized, "session has been revoked — sign in again")
 			}
 
 			c.Set("user_id", claims.UserID)

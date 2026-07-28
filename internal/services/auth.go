@@ -18,6 +18,14 @@ type Claims struct {
 	UserID string      `json:"user_id"`
 	Email  string      `json:"email"`
 	Role   models.Role `json:"role"`
+	// TokenVersion is compared against the user row on every request. A token
+	// issued before a revocation carries a stale value and is refused.
+	//
+	// Tokens minted before this field existed decode it as 0, which matches no
+	// live user, so deploying this signs everyone out once. That is deliberate:
+	// the alternative is accepting an unversioned token as a permanent
+	// exception, which is a revocation bypass that never expires.
+	TokenVersion int `json:"token_version"`
 	jwt.RegisteredClaims
 }
 
@@ -40,9 +48,10 @@ func Login(db *gorm.DB, cfg *config.Config, email string, password string) (stri
 
 func IssueToken(cfg *config.Config, user models.User) (string, error) {
 	claims := Claims{
-		UserID: user.ID.String(),
-		Email:  user.Email,
-		Role:   user.Role,
+		UserID:       user.ID.String(),
+		Email:        user.Email,
+		Role:         user.Role,
+		TokenVersion: user.TokenVersion,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   user.ID.String(),
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Duration(config.TokenTTLHours()) * time.Hour)),
@@ -185,6 +194,18 @@ func ClaimInvitation(db *gorm.DB, token string, password string, capstoneTitle s
 func UserIDFromString(value string) uuid.UUID {
 	id, _ := uuid.Parse(value)
 	return id
+}
+
+// RevokeAllSessions invalidates every access token this user currently holds by
+// moving their token version on. Refresh tokens are revoked separately; this
+// covers the credentials already in circulation.
+//
+// A single UPDATE with an expression rather than a read-then-write, so two
+// concurrent revocations both take effect instead of one overwriting the other
+// with a stale value.
+func RevokeAllSessions(db *gorm.DB, userID uuid.UUID) error {
+	return db.Model(&models.User{}).Where("id = ?", userID).
+		UpdateColumn("token_version", gorm.Expr("token_version + 1")).Error
 }
 
 // MinPasswordLength is the shortest password the system accepts anywhere.

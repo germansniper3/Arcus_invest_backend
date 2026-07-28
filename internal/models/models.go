@@ -48,6 +48,14 @@ type User struct {
 	Role         Role       `json:"role" gorm:"type:varchar(40);index;not null"`
 	IsActive     bool       `json:"is_active" gorm:"default:true"`
 	LastLoginAt  *time.Time `json:"last_login_at"`
+	// TokenVersion is stamped into every access token and re-checked on every
+	// request. Incrementing it invalidates all of this user's outstanding tokens
+	// at once — the mechanism behind a password reset and "sign out everywhere".
+	//
+	// It lives on the user row rather than in an in-process denylist so that
+	// revocation is coherent across replicas, and because the auth middleware
+	// already reads this row on every request: the check costs no extra query.
+	TokenVersion int `json:"-" gorm:"not null;default:1"`
 	StudentProfile *StudentProfile `json:"student_profile,omitempty"`
 }
 
