@@ -568,7 +568,10 @@ type Product struct {
 	Slug        string  `json:"slug" gorm:"uniqueIndex;not null"`
 	Description string  `json:"description" gorm:"type:text;not null"`
 	Price       float64 `json:"price"`
-	Stock       int     `json:"stock"`
+	// Stock is deliberately absent. The quantity on hand is the sum of the
+	// StockMovement ledger, not a column anyone can overwrite — see
+	// stock_models.go. Handlers render it into the `stock` JSON key so the wire
+	// format is unchanged.
 	ImageURL    string  `json:"image_url"`
 	Specs       string  `json:"specs" gorm:"type:text"` // e.g. "Range: 60km | Battery: 48V"
 	IsPublished bool    `json:"is_published" gorm:"default:true"`

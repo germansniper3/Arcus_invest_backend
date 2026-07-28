@@ -6,6 +6,7 @@ import (
 	"arcusinvest/internal/models"
 	"arcusinvest/internal/services"
 	"arcusinvest/internal/storage"
+	"errors"
 	"fmt"
 	"mime"
 	"net/http"
@@ -1187,7 +1188,11 @@ func (h Handler) ListPublicProducts(c echo.Context) error {
 	if err := h.DB.Where("is_published = ?", true).Order("name asc").Find(&rows).Error; err != nil {
 		return c.JSON(http.StatusInternalServerError, errResponse("could not load products"))
 	}
-	return c.JSON(http.StatusOK, rows)
+	out, err := h.productsJSON(rows)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not load products"))
+	}
+	return c.JSON(http.StatusOK, out)
 }
 
 func (h Handler) GetPublicProduct(c echo.Context) error {
@@ -1195,7 +1200,11 @@ func (h Handler) GetPublicProduct(c echo.Context) error {
 	if err := h.DB.Where("slug = ? AND is_published = ?", c.Param("slug"), true).First(&row).Error; err != nil {
 		return c.JSON(http.StatusNotFound, errResponse("product not found"))
 	}
-	return c.JSON(http.StatusOK, row)
+	onHand, err := services.StockOnHand(h.DB, row.ID)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not load the product"))
+	}
+	return c.JSON(http.StatusOK, productJSON(row, onHand))
 }
 
 func (h Handler) AdminListProducts(c echo.Context) error {
@@ -1203,7 +1212,11 @@ func (h Handler) AdminListProducts(c echo.Context) error {
 	if err := h.DB.Order("name asc").Find(&rows).Error; err != nil {
 		return c.JSON(http.StatusInternalServerError, errResponse("could not load products"))
 	}
-	return c.JSON(http.StatusOK, rows)
+	out, err := h.productsJSON(rows)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not load products"))
+	}
+	return c.JSON(http.StatusOK, out)
 }
 
 func (h Handler) AdminCreateProduct(c echo.Context) error {
@@ -1222,11 +1235,13 @@ func (h Handler) AdminCreateProduct(c echo.Context) error {
 	if strings.TrimSpace(req.Name) == "" {
 		return c.JSON(http.StatusBadRequest, errResponse("product name is required"))
 	}
+	if req.Stock < 0 {
+		return c.JSON(http.StatusBadRequest, errResponse("opening stock cannot be negative"))
+	}
 	product := models.Product{
 		Name:        req.Name,
 		Description: req.Description,
 		Price:       req.Price,
-		Stock:       req.Stock,
 		ImageURL:    req.ImageURL,
 		Specs:       req.Specs,
 		IsPublished: req.IsPublished,
@@ -1235,7 +1250,19 @@ func (h Handler) AdminCreateProduct(c echo.Context) error {
 	if err := h.DB.Create(&product).Error; err != nil {
 		return c.JSON(http.StatusInternalServerError, errResponse("could not create product"))
 	}
-	return c.JSON(http.StatusCreated, product)
+	// Stock supplied at creation is an opening balance, not a column write. It
+	// is the one legitimate use of the opening kind, and it goes through the
+	// ledger like every other change.
+	if req.Stock > 0 {
+		opening := models.StockMovement{
+			ProductID: product.ID, Kind: models.StockOpening, Quantity: req.Stock,
+			Reason: "Opening balance set when the product was created",
+		}
+		if err := h.recordMovement(c, &opening); err != nil {
+			return c.JSON(http.StatusInternalServerError, errResponse("the product was created, but its opening stock could not be recorded"))
+		}
+	}
+	return c.JSON(http.StatusCreated, productJSON(product, req.Stock))
 }
 
 func (h Handler) AdminUpdateProduct(c echo.Context) error {
@@ -1278,9 +1305,6 @@ func (h Handler) AdminUpdateProduct(c echo.Context) error {
 	if req.Price != nil {
 		row.Price = *req.Price
 	}
-	if req.Stock != nil {
-		row.Stock = *req.Stock
-	}
 	if req.IsPublished != nil {
 		row.IsPublished = *req.IsPublished
 	}
@@ -1288,7 +1312,35 @@ func (h Handler) AdminUpdateProduct(c echo.Context) error {
 	if err := h.DB.Save(&row).Error; err != nil {
 		return c.JSON(http.StatusInternalServerError, errResponse("could not update product"))
 	}
-	return c.JSON(http.StatusOK, row)
+
+	onHand, err := services.StockOnHand(h.DB, row.ID)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not compute stock on hand"))
+	}
+	// A stock figure sent with a product edit is a stock count: someone has
+	// looked at the shelf and is telling us what is actually there. It becomes
+	// an adjustment movement rather than overwriting the balance, so the
+	// correction carries an actor and a reason like every other change. A
+	// figure that matches what the ledger already says is not a correction, so
+	// it writes nothing.
+	if req.Stock != nil && *req.Stock != onHand {
+		delta := *req.Stock - onHand
+		adjustment := models.StockMovement{
+			ProductID: row.ID, Kind: models.StockAdjustment, Quantity: delta,
+			Reason: fmt.Sprintf("Stock count: corrected from %d to %d", onHand, *req.Stock),
+		}
+		if reason := services.ValidateMovement(adjustment); reason != "" {
+			return c.JSON(http.StatusBadRequest, errResponse(reason))
+		}
+		if err := h.recordMovement(c, &adjustment); err != nil {
+			if errors.Is(err, services.ErrInsufficientStock) {
+				return c.JSON(http.StatusConflict, errResponse(err.Error()))
+			}
+			return c.JSON(http.StatusInternalServerError, errResponse("could not record the stock adjustment"))
+		}
+		onHand = *req.Stock
+	}
+	return c.JSON(http.StatusOK, productJSON(row, onHand))
 }
 
 func (h Handler) AdminDeleteProduct(c echo.Context) error {
@@ -2577,6 +2629,10 @@ func (h Handler) AdminAccountRecommendations(c echo.Context) error {
 	if err := h.DB.Where("is_published = ?", true).Order("name asc").Find(&products).Error; err != nil {
 		return c.JSON(http.StatusInternalServerError, errResponse("could not load products"))
 	}
+	stockLevels, err := services.StockLevels(h.DB)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not load stock levels"))
+	}
 
 	// Summarise the account: strategic standing, spend, and what it already has.
 	var sector, segment string
@@ -2680,7 +2736,7 @@ func (h Handler) AdminAccountRecommendations(c echo.Context) error {
 				reasons = append(reasons, "well above typical deal size")
 			}
 		}
-		if p.Stock <= 0 {
+		if stockLevels[p.ID] <= 0 {
 			score -= 10
 			reasons = append(reasons, "out of stock")
 		}

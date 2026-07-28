@@ -43,6 +43,13 @@ func main() {
 	if err := database.Migrate(db); err != nil {
 		log.Fatal(err)
 	}
+	// Carries the pre-ledger products.stock values in as opening balances. It
+	// skips any product that already has movements, so it is safe on every
+	// boot; failing here would leave stock reading zero everywhere, which is a
+	// worse lie than not starting.
+	if err := handlers.BackfillStockOpeningBalances(db); err != nil {
+		log.Fatal(err)
+	}
 	if config.LegacyTokenTTLSet() {
 		log.Printf("WARN: JWT_TTL_HOURS is set but no longer used. Access tokens now last "+
 			"ACCESS_TOKEN_TTL_MINUTES (%s) and sessions are carried by refresh tokens for "+
@@ -240,6 +247,10 @@ func buildRouter(h handlers.Handler, cfg *config.Config, db *gorm.DB) *echo.Echo
 	admin.POST("/products/image", h.UploadProductImage)
 	admin.PUT("/products/:id", h.AdminUpdateProduct)
 	admin.DELETE("/products/:id", h.AdminDeleteProduct)
+	// The stock ledger. Quantity on hand is the sum of these rows; nothing
+	// writes a balance directly.
+	admin.GET("/products/:id/stock-movements", h.AdminListStockMovements)
+	admin.POST("/products/:id/stock-movements", h.AdminCreateStockMovement)
 
 	// Gallery (public "our work" showcase)
 	admin.GET("/gallery", h.AdminListGallery)
