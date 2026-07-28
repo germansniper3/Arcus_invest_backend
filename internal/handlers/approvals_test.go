@@ -10,6 +10,7 @@ import (
 
 	"arcusinvest/internal/database"
 	"arcusinvest/internal/models"
+	"arcusinvest/internal/seed"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -467,6 +468,24 @@ func TestRejectionBlocksRetryUntilResubmitted(t *testing.T) {
 	}
 }
 
+// seedBuiltInRoles populates custom_roles from the same source production does.
+//
+// Rule validation checks that the named approver role actually exists, and only
+// main() seeds that table — so on a database the server has never run against,
+// these tests would otherwise measure an empty role list. That is not a
+// hypothetical: it passed locally against a dev database with roles already in
+// it and failed in CI, which starts from an empty one.
+//
+// It also makes the "role cannot decide" case test what it claims to. Without
+// the seed, `admissions` is rejected for not existing rather than for lacking
+// the permission, so the branch under test is never reached.
+func seedBuiltInRoles(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	if err := seed.Roles(db); err != nil {
+		t.Fatalf("seed roles: %v", err)
+	}
+}
+
 // TestRuleValidationRefusesUnsatisfiableRules covers the footgun that would
 // otherwise present as "the app is broken" days later: a rule naming a role
 // that does not exist, or one that cannot decide approvals, blocks its action
@@ -475,6 +494,7 @@ func TestRuleValidationRefusesUnsatisfiableRules(t *testing.T) {
 	db := testDB(t)
 	h := Handler{DB: db}
 	e := echo.New()
+	seedBuiltInRoles(t, db)
 	actor := fixtureUser(t, db, models.RoleSuperAdmin)
 
 	cases := []struct {
@@ -507,6 +527,7 @@ func TestCreateValidRuleSucceeds(t *testing.T) {
 	db := testDB(t)
 	h := Handler{DB: db}
 	e := echo.New()
+	seedBuiltInRoles(t, db)
 	actor := fixtureUser(t, db, models.RoleSuperAdmin)
 
 	c, rec := adminCtx(e, http.MethodPost,
