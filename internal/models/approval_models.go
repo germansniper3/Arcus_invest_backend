@@ -26,6 +26,17 @@ const (
 	// only the first would let an approved K5,000 order be settled for K50,000.
 	ApprovalExpenseRecord = "expense.record"
 	ApprovalExpenseSettle = "expense.settle"
+
+	// ApprovalPurchaseOrderIssue gates sending an order to a supplier.
+	//
+	// Issue is the committing act, which is why the gate sits here and not on
+	// create: a draft costs nothing and revising one should not need a signature,
+	// but an issued order is a promise to pay that the supplier can hold the
+	// business to long before any invoice reaches the expense ledger. It is a
+	// separate decision from ApprovalExpenseRecord for the same reason that one
+	// is separate from ApprovalExpenseSettle — committing, booking the liability
+	// and paying it are three authorisations, not one.
+	ApprovalPurchaseOrderIssue = "purchase_order.issue"
 )
 
 // AllApprovalActions is the enumeration the rules API validates against, so an
@@ -39,6 +50,7 @@ var AllApprovalActions = []string{
 	ApprovalPaymentRecord,
 	ApprovalExpenseRecord,
 	ApprovalExpenseSettle,
+	ApprovalPurchaseOrderIssue,
 }
 
 // ApprovalRequest lifecycle.
@@ -66,6 +78,7 @@ const (
 	ApprovalEntityContract    = "contracts"
 	ApprovalEntityPayment     = "payments"
 	ApprovalEntityExpense     = "expenses"
+	ApprovalEntityPurchaseOrder = "purchase_orders"
 )
 
 // ApprovalRule is one configured threshold: at or above MinAmount, Action

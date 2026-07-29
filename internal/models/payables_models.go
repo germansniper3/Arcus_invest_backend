@@ -91,6 +91,27 @@ type Expense struct {
 	// the VAT account and understate the expense.
 	SmartInvoiceRef string `json:"smart_invoice_ref"`
 
+	// CustomsAssessmentRef is the ZRA customs entry / assessment number backing
+	// an imported purchase.
+	//
+	// It exists because the Smart Invoice rule above is a rule about DOMESTIC
+	// supply. VAT on an import is paid at the border and evidenced by the
+	// customs assessment; a foreign supplier has no ZRA Mark ID and cannot ever
+	// issue a Smart Invoice. Before this field, an import with standard-rated
+	// VAT fell through ReclaimableVat's Smart Invoice test and was reported as
+	// irrecoverable — overstating cost and understating the recoverable VAT
+	// account by the whole of the import VAT.
+	//
+	// It is a separate field rather than a customs number written into
+	// SmartInvoiceRef because the two are different documents proving different
+	// things, and a report that cannot tell them apart cannot be corrected later.
+	CustomsAssessmentRef string `json:"customs_assessment_ref"`
+
+	// PurchaseOrderID links the supplier invoice back to the order it bills.
+	// Nullable: not every expense comes from a purchase order, and an invoice
+	// may arrive before or after the goods it covers.
+	PurchaseOrderID *uuid.UUID `json:"purchase_order_id" gorm:"type:uuid;index"`
+
 	NetAmount    float64 `json:"net_amount"`
 	VatAmount    float64 `json:"vat_amount"`
 	VatTreatment string  `json:"vat_treatment" gorm:"index;not null;default:'none'"`
@@ -118,10 +139,21 @@ type Expense struct {
 func (e Expense) Gross() float64 { return e.NetAmount + e.VatAmount }
 
 // ReclaimableVat is the portion of VatAmount the business may claim back from
-// ZRA. See SmartInvoiceRef: without a Smart Invoice reference the claim is not
-// admissible, so the VAT is a cost and this returns zero.
+// ZRA.
+//
+// Two kinds of evidence support a claim, and they are not interchangeable:
+// a Smart Invoice for a domestic supply (see SmartInvoiceRef), or a customs
+// assessment for an import (see CustomsAssessmentRef). Either will do; neither
+// present means the VAT was paid and cannot be recovered, so it is a cost.
+//
+// Requiring a Smart Invoice on an import would be wrong, not merely strict —
+// no foreign supplier can issue one, so every import would report its border
+// VAT as sunk.
 func (e Expense) ReclaimableVat() float64 {
-	if e.VatTreatment != VatStandard || e.SmartInvoiceRef == "" {
+	if e.VatTreatment != VatStandard {
+		return 0
+	}
+	if e.SmartInvoiceRef == "" && e.CustomsAssessmentRef == "" {
 		return 0
 	}
 	return e.VatAmount

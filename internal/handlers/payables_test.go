@@ -106,6 +106,42 @@ func TestVatIsOnlyReclaimableAgainstASmartInvoice(t *testing.T) {
 	}
 }
 
+// Prevents: import VAT being written off as irrecoverable because no Smart
+// Invoice backs it.
+//
+// The Smart Invoice rule is about domestic supply. VAT on an import is paid at
+// the border and evidenced by the ZRA customs assessment — a foreign supplier
+// has no Mark ID and can never issue one. Testing imports against the Smart
+// Invoice field would report every import's border VAT as sunk cost, which
+// overstates cost of sales and understates the recoverable VAT account.
+func TestImportVatIsReclaimableAgainstACustomsAssessment(t *testing.T) {
+	imported := models.Expense{
+		VatTreatment: models.VatStandard, NetAmount: 4000, VatAmount: 640,
+		CustomsAssessmentRef: "C-2026-118842",
+	}
+	if got := imported.ReclaimableVat(); got != 640 {
+		t.Errorf("import with a customs assessment: reclaimable = %v, want 640", got)
+	}
+
+	// An import with neither form of evidence is still unrecoverable — the new
+	// field must widen the rule, not disable it.
+	noEvidence := models.Expense{
+		VatTreatment: models.VatStandard, NetAmount: 4000, VatAmount: 640,
+	}
+	if got := noEvidence.ReclaimableVat(); got != 0 {
+		t.Errorf("no evidence at all: reclaimable = %v, want 0", got)
+	}
+
+	// A customs reference cannot rescue a supply that carries no VAT to reclaim.
+	exemptImport := models.Expense{
+		VatTreatment: models.VatExempt, NetAmount: 4000, VatAmount: 0,
+		CustomsAssessmentRef: "C-2026-118843",
+	}
+	if got := exemptImport.ReclaimableVat(); got != 0 {
+		t.Errorf("exempt import: reclaimable = %v, want 0", got)
+	}
+}
+
 // Prevents: VAT being booked against a supply that cannot legally carry it —
 // an exempt, zero-rated or unregistered-supplier purchase — which would put
 // irrecoverable tax into the VAT account.

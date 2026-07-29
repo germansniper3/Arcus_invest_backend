@@ -59,5 +59,10 @@ func Migrate(db *gorm.DB) error {
 		&models.TillSession{},
 		&models.CounterSale{},
 		&models.CounterSaleLine{},
+		&models.PurchaseOrder{},
+		&models.PurchaseOrderLine{},
+		&models.GoodsReceipt{},
+		&models.GoodsReceiptLine{},
+		&models.LandedCostComponent{},
 	)
 }
