@@ -285,6 +285,21 @@ func buildRouter(h handlers.Handler, cfg *config.Config, db *gorm.DB) *echo.Echo
 	// The combined cash position: owed to us, owed by us, net.
 	admin.GET("/position", h.AdminPosition)
 
+	// The buy side. Ordering, taking delivery and being invoiced are three
+	// separate events — see models.PurchaseOrder. Issue is gated through the
+	// existing approval engine; receiving writes the stock ledger and never
+	// creates a payable, because goods routinely arrive before their invoice.
+	admin.GET("/purchase-orders", h.AdminListPurchaseOrders)
+	admin.POST("/purchase-orders", h.AdminCreatePurchaseOrder)
+	admin.GET("/purchase-orders/:id", h.AdminGetPurchaseOrder)
+	admin.PUT("/purchase-orders/:id", h.AdminUpdatePurchaseOrder)
+	admin.POST("/purchase-orders/:id/issue", h.AdminIssuePurchaseOrder)
+	admin.POST("/purchase-orders/:id/cancel", h.AdminCancelPurchaseOrder)
+	admin.POST("/purchase-orders/:id/receipts", h.AdminReceiveGoods)
+	admin.GET("/purchase-orders/:id/receipts", h.AdminListGoodsReceipts)
+	// A late clearing invoice recalculates the unit cost already in the ledger.
+	admin.POST("/goods-receipts/:receiptId/components", h.AdminAddLandedCostComponent)
+
 	// Walk-in selling. Deliberately separate from the deal pipeline — see the
 	// note on models.CounterSale.
 	admin.GET("/till-sessions", h.AdminListTillSessions)

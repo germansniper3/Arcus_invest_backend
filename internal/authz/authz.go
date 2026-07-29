@@ -67,6 +67,12 @@ const (
 	// serving customers has no business in the deal pipeline, the debtor book
 	// or the supplier ledger.
 	ResCounterSales Resource = "counter_sales"
+	// PurchaseOrders is the buy side: ordering from suppliers, receiving goods
+	// and the landed cost that comes with them. It is separate from Expenses
+	// because the two are different acts at different times — committing to buy
+	// is not the same as booking the invoice for it, and a storekeeper who
+	// receives deliveries has no business in the supplier ledger or the bank.
+	ResPurchaseOrders Resource = "purchase_orders"
 )
 
 // AllResources is the enumeration used by the permissions payload and tests.
@@ -74,7 +80,7 @@ var AllResources = []Resource{
 	ResOpportunities, ResAccounts, ResContracts, ResPayments, ResQuotes,
 	ResEnrollments, ResStudents, ResEvents, ResProducts, ResUsers,
 	ResAudit, ResEmail, ResMetrics, ResRoles, ResGallery, ResNotifications,
-	ResApprovals, ResExpenses, ResCounterSales,
+	ResApprovals, ResExpenses, ResCounterSales, ResPurchaseOrders,
 }
 
 type Action string
@@ -161,7 +167,7 @@ var BuiltInGrants = map[models.Role]map[Resource]Grant{
 		ResUsers: full(), ResAudit: full(), ResEmail: full(), ResMetrics: readOnly(),
 		ResRoles: full(), ResGallery: full(), ResNotifications: ownInbox(),
 		ResApprovals: approvalDesk(), ResExpenses: full(),
-		ResCounterSales: full(),
+		ResCounterSales: full(), ResPurchaseOrders: full(),
 	},
 	models.RoleAdmin: {
 		ResOpportunities: full(), ResAccounts: full(), ResContracts: full(),
@@ -170,7 +176,7 @@ var BuiltInGrants = map[models.Role]map[Resource]Grant{
 		ResUsers: full(), ResAudit: full(), ResEmail: full(), ResMetrics: readOnly(),
 		ResGallery: full(), ResNotifications: ownInbox(),
 		ResApprovals: approvalDesk(), ResExpenses: full(),
-		ResCounterSales: full(),
+		ResCounterSales: full(), ResPurchaseOrders: full(),
 	},
 	models.RoleAdmissions: {
 		ResEnrollments:   full(),
@@ -404,6 +410,11 @@ var pathResources = map[string]Resource{
 	// Walk-in selling and the shifts that contain it.
 	"counter-sales":  ResCounterSales,
 	"till-sessions":  ResCounterSales,
+	// The buy side. Goods receipts and their landed cost hang off an order, so
+	// they share its resource: someone who can receive a delivery necessarily
+	// sees what was ordered.
+	"purchase-orders": ResPurchaseOrders,
+	"goods-receipts":  ResPurchaseOrders,
 	"audit-logs":    ResAudit,
 	"email":         ResEmail,
 	"metrics":       ResMetrics,

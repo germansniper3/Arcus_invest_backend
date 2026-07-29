@@ -38,14 +38,17 @@ func expenseJSON(e models.Expense) map[string]any {
 		"id": e.ID, "created_at": e.CreatedAt, "updated_at": e.UpdatedAt,
 		"supplier": e.Supplier, "supplier_tpin": e.SupplierTPIN,
 		"category": e.Category, "reference": e.Reference,
-		"smart_invoice_ref": e.SmartInvoiceRef,
-		"net_amount":        e.NetAmount,
-		"vat_amount":        e.VatAmount,
-		"vat_treatment":     e.VatTreatment,
-		"gross":             e.Gross(),
-		"reclaimable_vat":   e.ReclaimableVat(),
+		"smart_invoice_ref":      e.SmartInvoiceRef,
+		"customs_assessment_ref": e.CustomsAssessmentRef,
+		"purchase_order_id":      e.PurchaseOrderID,
+		"net_amount":             e.NetAmount,
+		"vat_amount":             e.VatAmount,
+		"vat_treatment":          e.VatTreatment,
+		"gross":                  e.Gross(),
+		"reclaimable_vat":        e.ReclaimableVat(),
 		// Says out loud why VAT on this expense is or is not recoverable, so the
-		// screen never has to reimplement the Smart Invoice rule.
+		// screen never has to reimplement the evidence rules — Smart Invoice for a
+		// domestic supply, customs assessment for an import.
 		"vat_recoverable": e.ReclaimableVat() > 0,
 		"settled":         e.Settled(),
 		"outstanding":     e.Outstanding(),
@@ -83,18 +86,22 @@ func (h Handler) AdminListExpenses(c echo.Context) error {
 }
 
 type expenseRequest struct {
-	Supplier        string     `json:"supplier"`
-	SupplierTPIN    string     `json:"supplier_tpin"`
-	Category        string     `json:"category"`
-	Reference       string     `json:"reference"`
-	SmartInvoiceRef string     `json:"smart_invoice_ref"`
-	NetAmount       float64    `json:"net_amount"`
-	VatAmount       float64    `json:"vat_amount"`
-	VatTreatment    string     `json:"vat_treatment"`
-	IncurredAt      *time.Time `json:"incurred_at"`
-	DueDate         *time.Time `json:"due_date"`
-	OpportunityID   *uuid.UUID `json:"opportunity_id"`
-	Notes           string     `json:"notes"`
+	Supplier        string `json:"supplier"`
+	SupplierTPIN    string `json:"supplier_tpin"`
+	Category        string `json:"category"`
+	Reference       string `json:"reference"`
+	SmartInvoiceRef string `json:"smart_invoice_ref"`
+	// CustomsAssessmentRef is the import's evidence for its input VAT. See the
+	// field comment on models.Expense for why it is not the Smart Invoice field.
+	CustomsAssessmentRef string     `json:"customs_assessment_ref"`
+	PurchaseOrderID      *uuid.UUID `json:"purchase_order_id"`
+	NetAmount            float64    `json:"net_amount"`
+	VatAmount            float64    `json:"vat_amount"`
+	VatTreatment         string     `json:"vat_treatment"`
+	IncurredAt           *time.Time `json:"incurred_at"`
+	DueDate              *time.Time `json:"due_date"`
+	OpportunityID        *uuid.UUID `json:"opportunity_id"`
+	Notes                string     `json:"notes"`
 }
 
 // validateExpense applies the rules that must hold whether the row is being
@@ -154,18 +161,20 @@ func (h Handler) AdminCreateExpense(c echo.Context) error {
 		incurred = *req.IncurredAt
 	}
 	row := models.Expense{
-		Supplier:        strings.TrimSpace(req.Supplier),
-		SupplierTPIN:    strings.TrimSpace(req.SupplierTPIN),
-		Category:        req.Category,
-		Reference:       strings.TrimSpace(req.Reference),
-		SmartInvoiceRef: strings.TrimSpace(req.SmartInvoiceRef),
-		NetAmount:       req.NetAmount,
-		VatAmount:       req.VatAmount,
-		VatTreatment:    req.VatTreatment,
-		IncurredAt:      incurred,
-		DueDate:         req.DueDate,
-		OpportunityID:   req.OpportunityID,
-		Notes:           strings.TrimSpace(req.Notes),
+		Supplier:             strings.TrimSpace(req.Supplier),
+		SupplierTPIN:         strings.TrimSpace(req.SupplierTPIN),
+		Category:             req.Category,
+		Reference:            strings.TrimSpace(req.Reference),
+		SmartInvoiceRef:      strings.TrimSpace(req.SmartInvoiceRef),
+		CustomsAssessmentRef: strings.TrimSpace(req.CustomsAssessmentRef),
+		PurchaseOrderID:      req.PurchaseOrderID,
+		NetAmount:            req.NetAmount,
+		VatAmount:            req.VatAmount,
+		VatTreatment:         req.VatTreatment,
+		IncurredAt:           incurred,
+		DueDate:              req.DueDate,
+		OpportunityID:        req.OpportunityID,
+		Notes:                strings.TrimSpace(req.Notes),
 	}
 	var actor models.User
 	if err := h.DB.First(&actor, "id = ?", c.Get("user_id")).Error; err == nil {
@@ -208,13 +217,15 @@ func (h Handler) AdminUpdateExpense(c echo.Context) error {
 		"supplier_tpin":     strings.TrimSpace(req.SupplierTPIN),
 		"category":          req.Category,
 		"reference":         strings.TrimSpace(req.Reference),
-		"smart_invoice_ref": strings.TrimSpace(req.SmartInvoiceRef),
-		"net_amount":        req.NetAmount,
-		"vat_amount":        req.VatAmount,
-		"vat_treatment":     req.VatTreatment,
-		"due_date":          req.DueDate,
-		"opportunity_id":    req.OpportunityID,
-		"notes":             strings.TrimSpace(req.Notes),
+		"smart_invoice_ref":      strings.TrimSpace(req.SmartInvoiceRef),
+		"customs_assessment_ref": strings.TrimSpace(req.CustomsAssessmentRef),
+		"purchase_order_id":      req.PurchaseOrderID,
+		"net_amount":             req.NetAmount,
+		"vat_amount":             req.VatAmount,
+		"vat_treatment":          req.VatTreatment,
+		"due_date":               req.DueDate,
+		"opportunity_id":         req.OpportunityID,
+		"notes":                  strings.TrimSpace(req.Notes),
 	}
 	if req.IncurredAt != nil {
 		updates["incurred_at"] = *req.IncurredAt
