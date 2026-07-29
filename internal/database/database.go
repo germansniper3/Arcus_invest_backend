@@ -64,5 +64,8 @@ func Migrate(db *gorm.DB) error {
 		&models.GoodsReceipt{},
 		&models.GoodsReceiptLine{},
 		&models.LandedCostComponent{},
+		&models.SourcingRequest{},
+		&models.SupplierQuote{},
+		&models.SourcingPolicy{},
 	)
 }
