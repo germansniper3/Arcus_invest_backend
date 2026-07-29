@@ -6,6 +6,7 @@ Two products in one codebase, sharing a single identity and permission system:
   capstone milestones, progress reports, extension requests and file submissions.
 - **Commercial CRM** — the B2B side. Leads → deals → quotations → contracts → payments, with
   document versioning, contract signing, an aged debtor book, and value-based approval controls.
+  Plus the buy side: sourcing, purchase orders, goods receipt, landed cost and margin per deal.
 
 Plus a public marketing site, a product catalogue, an events manager, and an AI assistant.
 
@@ -37,6 +38,7 @@ styles; Radix supplies unstyled behaviour (dialogs) only.
 | [Security](docs/SECURITY.md) | Sessions, approvals, document integrity, audit trail, known gaps |
 | [API](docs/API.md) | Every route, grouped by surface, with the permission each requires |
 | [Operations](docs/OPERATIONS.md) | Environment variables, deployment, CI, runbook |
+| [User Manual](docs/USER-MANUAL.md) | For the people who run the business — no technical background assumed |
 
 > **This repo is the backend.** The frontend is a separate repository
 > (`Arcus_invest_frontend`), checked out alongside this one as `../frontend`. There is no monorepo
@@ -79,8 +81,24 @@ Then open:
 cd backend && go build ./... && go vet ./... && go test ./... -count=1
 ```
 
-DB-backed tests skip when `DATABASE_URL` is unset and otherwise run inside a transaction that is
-rolled back, so a run leaves the database exactly as it found it.
+DB-backed tests run inside a transaction that is rolled back, so a run leaves the database exactly
+as it found it.
+
+> **A run without `DATABASE_URL` is not a passing run.** `go test` does not read `.env`, and the
+> DB-backed tests call `t.Skip` when the variable is absent — every package still prints `ok` and the
+> command still exits 0. Measured on a clean `main`: **59 of 118 top-level tests skip**, and the 59
+> that skip are precisely the money ones (approvals, stock ledger, landed cost, payables, counter
+> sales). A green suite with the database down has tested none of the arithmetic.
+>
+> Pass it explicitly, and confirm nothing skipped:
+>
+> ```bash
+> DATABASE_URL='postgres://arcus:arcus@localhost:5434/citest?sslmode=disable' go test ./... -count=1
+> DATABASE_URL='...' go test ./... -count=1 -v | grep -c -- '--- SKIP'   # must be 0
+> ```
+>
+> With the variable set: 118 top-level tests, 136 including subtests, 0 skipped. CI sets it, so CI
+> has always run the full suite — it is local runs that quietly do not.
 
 ```bash
 cd frontend && npx tsc --noEmit && npm run build
@@ -125,6 +143,37 @@ recorded against deals and feed an aged receivables report computed live from li
 payments — never stored, so it cannot drift.
 
 High-consequence actions are gated on value. See [Security](docs/SECURITY.md#approval-thresholds).
+
+### Procurement and cost
+
+`sourcing → purchase order → goods receipt → landed cost → margin`
+
+The buy side, which is what lets the system state what a thing actually cost rather than what a
+supplier charged for it. Arcus imports and resells, so the two are not the same number.
+
+Ordering, taking delivery and being invoiced are **three separate events**, deliberately not
+collapsed: a consignment can arrive in two shipments and be invoiced once, or be paid for months
+before it ships. A purchase order commits; a goods receipt writes `StockMovement{Kind: receipt}`
+and supports partial delivery; a supplier invoice is an `Expense`. Issuing an order is gated
+through the same approvals engine as everything else, on a new `purchase_order.issue` action.
+
+Landed cost records freight, insurance, duty, clearing and handling against a receipt and
+apportions them into `StockMovement.UnitCost` — by value, quantity or weight, with the basis
+**stored** so the arithmetic can be re-derived later. Apportionment runs in integer ngwee by the
+largest-remainder method, so the shares always sum back to the cost incurred; the remainder goes to
+the largest remainder first and ties to the earlier line, which makes it reproducible. Components
+are retained individually rather than collapsed into the result, because a late clearing invoice is
+normal and has to be able to recalculate.
+
+Job costing then falls out of it: `Expense.OpportunityID` and `StockMovement.OpportunityID` attribute
+cost to a deal, and margin is deal value less cost of goods at landed cost less directly attributed
+expenses, surfaced next to the deal rather than on a separate report.
+
+**Import VAT is not Smart Invoice VAT.** The Smart Invoice rule is about domestic supply; VAT on an
+import is paid at the border and evidenced by the customs assessment, and a foreign supplier can
+never issue a ZRA Mark ID. `Expense.CustomsAssessmentRef` carries that evidence and
+`ReclaimableVat()` accepts either. Before it existed, every import reported its border VAT as
+irrecoverable, overstating cost and understating the recoverable VAT account.
 
 ---
 
