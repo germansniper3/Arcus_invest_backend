@@ -30,10 +30,10 @@ jobs:
       FRONTEND_URL: http://localhost:5173
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: '1.25'
           cache: true
@@ -41,11 +41,30 @@ jobs:
       - name: Download modules
         run: go mod download
 
+      # Formatting is a build concern, not a review concern. gofmt -l prints
+      # files needing formatting and exits 0 either way, so the diff has to be
+      # turned into the failure.
+      - name: Format check
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt'd:"; echo "$unformatted"; exit 1
+          fi
+
       - name: Vet
         run: go vet ./...
 
       - name: Build
         run: go build ./...
 
-      - name: Test (unit + DB integration)
-        run: go test ./... -count=1
+      # -race matters specifically here. The approvals gate is what stops one
+      # authorisation being spent twice, and it relies on a conditional UPDATE
+      # plus RowsAffected to arbitrate between concurrent retries. That is the
+      # class of bug that passes every serial test and fails under load.
+      #
+      # DATABASE_URL is set at the job level, which is what makes this the full
+      # suite. Without it the DB-backed tests call t.Skip and every package
+      # still prints ok - 59 of 118 top-level tests silently do not run, and
+      # they are the money ones.
+      - name: Test (unit + DB integration, race detector)
+        run: go test ./... -count=1 -race

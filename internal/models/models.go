@@ -28,8 +28,8 @@ const (
 
 type BaseModel struct {
 	ID        uuid.UUID      `json:"id" gorm:"type:uuid;primaryKey"`
-	CreatedAt time.Time     `json:"created_at"`
-	UpdatedAt time.Time     `json:"updated_at"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
 	DeletedAt gorm.DeletedAt `json:"-" gorm:"index"`
 }
 
@@ -55,41 +55,41 @@ type User struct {
 	// It lives on the user row rather than in an in-process denylist so that
 	// revocation is coherent across replicas, and because the auth middleware
 	// already reads this row on every request: the check costs no extra query.
-	TokenVersion int `json:"-" gorm:"not null;default:1"`
+	TokenVersion   int             `json:"-" gorm:"not null;default:1"`
 	StudentProfile *StudentProfile `json:"student_profile,omitempty"`
 }
 
 type StudentProfile struct {
 	BaseModel
-	UserID       uuid.UUID `json:"user_id" gorm:"type:uuid;uniqueIndex;not null"`
-	User         User      `json:"-" gorm:"constraint:OnDelete:CASCADE"`
-	EnrollmentID *uuid.UUID `json:"enrollment_id" gorm:"type:uuid;index"`
-	Tier         string    `json:"tier" gorm:"index"`
-	ProgressPct int       `json:"progress_pct" gorm:"default:0"`
-	CapstoneTitle string  `json:"capstone_title"`
-	CapstoneSummary string `json:"capstone_summary" gorm:"type:text"`
+	UserID          uuid.UUID  `json:"user_id" gorm:"type:uuid;uniqueIndex;not null"`
+	User            User       `json:"-" gorm:"constraint:OnDelete:CASCADE"`
+	EnrollmentID    *uuid.UUID `json:"enrollment_id" gorm:"type:uuid;index"`
+	Tier            string     `json:"tier" gorm:"index"`
+	ProgressPct     int        `json:"progress_pct" gorm:"default:0"`
+	CapstoneTitle   string     `json:"capstone_title"`
+	CapstoneSummary string     `json:"capstone_summary" gorm:"type:text"`
 }
 
 type Enrollment struct {
 	BaseModel
-	FullName      string           `json:"full_name" gorm:"not null"`
-	Email         string           `json:"email" gorm:"index;not null"`
-	Phone         string           `json:"phone" gorm:"index;not null"`
-	AgeRange      string           `json:"age_range"`
-	Location      string           `json:"location"`
-	CurrentStatus string           `json:"current_status"`
-	About         string           `json:"about" gorm:"type:text"`
-	Interests     string           `json:"interests" gorm:"type:text"`
-	HasProject    string           `json:"has_project"`
-	ProjectIdea   string           `json:"project_idea" gorm:"type:text"`
-	ContactPref   string           `json:"contact_pref"`
-	NextOfKin     string           `json:"next_of_kin" gorm:"type:text"`
-	Tier          string           `json:"tier" gorm:"index"`
-	Status        EnrollmentStatus `json:"status" gorm:"type:varchar(40);index;not null;default:'submitted'"`
-	Notes         string           `json:"notes" gorm:"type:text"`
-	AssignedUserID *uuid.UUID      `json:"assigned_user_id" gorm:"type:uuid;index"`
-	StudentUserID *uuid.UUID       `json:"student_user_id" gorm:"type:uuid;index"`
-	OrientationAt *time.Time       `json:"orientation_at"`
+	FullName       string           `json:"full_name" gorm:"not null"`
+	Email          string           `json:"email" gorm:"index;not null"`
+	Phone          string           `json:"phone" gorm:"index;not null"`
+	AgeRange       string           `json:"age_range"`
+	Location       string           `json:"location"`
+	CurrentStatus  string           `json:"current_status"`
+	About          string           `json:"about" gorm:"type:text"`
+	Interests      string           `json:"interests" gorm:"type:text"`
+	HasProject     string           `json:"has_project"`
+	ProjectIdea    string           `json:"project_idea" gorm:"type:text"`
+	ContactPref    string           `json:"contact_pref"`
+	NextOfKin      string           `json:"next_of_kin" gorm:"type:text"`
+	Tier           string           `json:"tier" gorm:"index"`
+	Status         EnrollmentStatus `json:"status" gorm:"type:varchar(40);index;not null;default:'submitted'"`
+	Notes          string           `json:"notes" gorm:"type:text"`
+	AssignedUserID *uuid.UUID       `json:"assigned_user_id" gorm:"type:uuid;index"`
+	StudentUserID  *uuid.UUID       `json:"student_user_id" gorm:"type:uuid;index"`
+	OrientationAt  *time.Time       `json:"orientation_at"`
 }
 
 type OnboardingInvitation struct {
@@ -143,26 +143,26 @@ type RefreshToken struct {
 
 type Event struct {
 	BaseModel
-	Title        string    `json:"title" gorm:"not null"`
-	Slug         string    `json:"slug" gorm:"uniqueIndex;not null"`
-	Description  string    `json:"description" gorm:"type:text;not null"`
-	ImageURL     string    `json:"image_url"`
-	Date         time.Time `json:"date" gorm:"not null"`
-	Location     string    `json:"location"`
-	Capacity     int       `json:"capacity"`
-	IsPublished  bool      `json:"is_published" gorm:"default:false"`
+	Title       string    `json:"title" gorm:"not null"`
+	Slug        string    `json:"slug" gorm:"uniqueIndex;not null"`
+	Description string    `json:"description" gorm:"type:text;not null"`
+	ImageURL    string    `json:"image_url"`
+	Date        time.Time `json:"date" gorm:"not null"`
+	Location    string    `json:"location"`
+	Capacity    int       `json:"capacity"`
+	IsPublished bool      `json:"is_published" gorm:"default:false"`
 }
 
 type Reservation struct {
 	BaseModel
-	EventID   uuid.UUID  `json:"event_id" gorm:"type:uuid;index;not null"`
-	Event     Event      `json:"event" gorm:"constraint:OnDelete:CASCADE"`
-	UserID    *uuid.UUID `json:"user_id" gorm:"type:uuid;index"`
-	FullName  string     `json:"full_name" gorm:"not null"`
-	Email     string     `json:"email" gorm:"index;not null"`
-	Phone     string     `json:"phone"`
-	Notes     string     `json:"notes" gorm:"type:text"`
-	Status    string     `json:"status" gorm:"default:'pending'"` // pending, confirmed, cancelled
+	EventID  uuid.UUID  `json:"event_id" gorm:"type:uuid;index;not null"`
+	Event    Event      `json:"event" gorm:"constraint:OnDelete:CASCADE"`
+	UserID   *uuid.UUID `json:"user_id" gorm:"type:uuid;index"`
+	FullName string     `json:"full_name" gorm:"not null"`
+	Email    string     `json:"email" gorm:"index;not null"`
+	Phone    string     `json:"phone"`
+	Notes    string     `json:"notes" gorm:"type:text"`
+	Status   string     `json:"status" gorm:"default:'pending'"` // pending, confirmed, cancelled
 }
 
 type CapstoneMilestone struct {
@@ -213,12 +213,12 @@ type Submission struct {
 	BaseModel
 	StudentProfileID uuid.UUID  `json:"student_profile_id" gorm:"type:uuid;index;not null"`
 	Title            string     `json:"title" gorm:"not null"`
-	Kind             string     `json:"kind"` // proposal, report, final, other
-	FileName         string     `json:"file_name"`     // original client filename, display only
+	Kind             string     `json:"kind"`              // proposal, report, final, other
+	FileName         string     `json:"file_name"`         // original client filename, display only
 	StoredKey        string     `json:"-" gorm:"not null"` // opaque storage key, never exposed
 	ContentType      string     `json:"content_type"`
-	Size             int64      `json:"size"`      // bytes
-	FileHash         string     `json:"file_hash"` // SHA256, lowercase hex
+	Size             int64      `json:"size"`                              // bytes
+	FileHash         string     `json:"file_hash"`                         // SHA256, lowercase hex
 	Status           string     `json:"status" gorm:"default:'submitted'"` // submitted, accepted, revise
 	ReviewNote       string     `json:"review_note" gorm:"type:text"`
 	ReviewedAt       *time.Time `json:"reviewed_at"`
@@ -236,15 +236,15 @@ type Broadcast struct {
 
 type QuoteRequest struct {
 	BaseModel
-	Name       string `json:"name" gorm:"not null"`
-	Email      string `json:"email" gorm:"index;not null"`
-	Phone      string `json:"phone"`
-	Company    string `json:"company"`
-	Service    string `json:"service" gorm:"index"`
+	Name        string `json:"name" gorm:"not null"`
+	Email       string `json:"email" gorm:"index;not null"`
+	Phone       string `json:"phone"`
+	Company     string `json:"company"`
+	Service     string `json:"service" gorm:"index"`
 	BudgetRange string `json:"budget_range"`
-	Message    string `json:"message" gorm:"type:text;not null"`
-	Status     string `json:"status" gorm:"index;not null;default:'new'"`
-	AdminNotes string `json:"admin_notes" gorm:"type:text"`
+	Message     string `json:"message" gorm:"type:text;not null"`
+	Status      string `json:"status" gorm:"index;not null;default:'new'"`
+	AdminNotes  string `json:"admin_notes" gorm:"type:text"`
 }
 
 // OpportunityStage is the deal-qualification pipeline stage. The open stages
@@ -276,19 +276,19 @@ const (
 // API response, not stored, mirroring the progress-percentage pattern).
 type Opportunity struct {
 	BaseModel
-	Name            string               `json:"name" gorm:"not null"`
-	AccountName     string               `json:"account_name" gorm:"index"`
-	ContactName     string               `json:"contact_name"`
-	ContactEmail    string               `json:"contact_email"`
-	Sector          string               `json:"sector" gorm:"index"`
-	Segment         string               `json:"segment" gorm:"index;default:'standard'"` // strategic, growth, standard
-	Stage           OpportunityStage     `json:"stage" gorm:"type:varchar(40);index;not null;default:'prospecting'"`
-	Grade           OpportunityGrade     `json:"grade" gorm:"type:varchar(20);index;not null;default:'bronze'"`
-	DealValue       float64              `json:"deal_value"`
-	Probability     int                  `json:"probability"` // 0–100, defaults per stage
-	OwnerID         *uuid.UUID           `json:"owner_id" gorm:"type:uuid;index"`
-	SourceQuoteID   *uuid.UUID           `json:"source_quote_id" gorm:"type:uuid;index"` // lead it converted from
-	ExpectedCloseAt *time.Time           `json:"expected_close_at"`
+	Name            string           `json:"name" gorm:"not null"`
+	AccountName     string           `json:"account_name" gorm:"index"`
+	ContactName     string           `json:"contact_name"`
+	ContactEmail    string           `json:"contact_email"`
+	Sector          string           `json:"sector" gorm:"index"`
+	Segment         string           `json:"segment" gorm:"index;default:'standard'"` // strategic, growth, standard
+	Stage           OpportunityStage `json:"stage" gorm:"type:varchar(40);index;not null;default:'prospecting'"`
+	Grade           OpportunityGrade `json:"grade" gorm:"type:varchar(20);index;not null;default:'bronze'"`
+	DealValue       float64          `json:"deal_value"`
+	Probability     int              `json:"probability"` // 0–100, defaults per stage
+	OwnerID         *uuid.UUID       `json:"owner_id" gorm:"type:uuid;index"`
+	SourceQuoteID   *uuid.UUID       `json:"source_quote_id" gorm:"type:uuid;index"` // lead it converted from
+	ExpectedCloseAt *time.Time       `json:"expected_close_at"`
 	// InvoicedAt is when the client was actually billed, set by an explicit
 	// action rather than inferred. It is the only honest basis for ageing a
 	// receivable: ExpectedCloseAt is a forecast, and UpdatedAt moves whenever
@@ -298,10 +298,10 @@ type Opportunity struct {
 	// owed can be computed server-side. It was previously a transient toggle in
 	// the document viewer, which meant nothing outside that screen could tell
 	// what the client was actually charged.
-	ApplyVat        bool                 `json:"apply_vat"`
-	Notes           string               `json:"notes" gorm:"type:text"`
-	Contacts        []OpportunityContact `json:"contacts" gorm:"foreignKey:OpportunityID;constraint:OnDelete:CASCADE"`
-	LineItems       []OpportunityLineItem `json:"line_items" gorm:"foreignKey:OpportunityID;constraint:OnDelete:CASCADE"`
+	ApplyVat  bool                  `json:"apply_vat"`
+	Notes     string                `json:"notes" gorm:"type:text"`
+	Contacts  []OpportunityContact  `json:"contacts" gorm:"foreignKey:OpportunityID;constraint:OnDelete:CASCADE"`
+	LineItems []OpportunityLineItem `json:"line_items" gorm:"foreignKey:OpportunityID;constraint:OnDelete:CASCADE"`
 }
 
 // OpportunityLineItem is a priced good/service on a deal, used to itemise the
@@ -348,12 +348,12 @@ type Contract struct {
 	// The file fields below describe the CURRENT revision. Every upload also
 	// appends a DocumentVersion, so these are a denormalised pointer at the
 	// latest one rather than the only copy.
-	FileName      string `json:"file_name"`
-	StoredKey     string `json:"-"`
-	ContentType   string `json:"content_type"`
-	Size          int64  `json:"size"`
-	FileHash      string `json:"file_hash"` // SHA256 of the current file, lowercase hex
-	CurrentVersion int   `json:"current_version"`
+	FileName       string `json:"file_name"`
+	StoredKey      string `json:"-"`
+	ContentType    string `json:"content_type"`
+	Size           int64  `json:"size"`
+	FileHash       string `json:"file_hash"` // SHA256 of the current file, lowercase hex
+	CurrentVersion int    `json:"current_version"`
 }
 
 // Document parent types. Versions and access logs are keyed by (type, id) so
@@ -376,11 +376,11 @@ type DocumentVersion struct {
 	BaseModel
 	ParentType   string     `json:"parent_type" gorm:"index:idx_docver_parent;not null"`
 	ParentID     uuid.UUID  `json:"parent_id" gorm:"type:uuid;index:idx_docver_parent;not null"`
-	Version       int       `json:"version" gorm:"not null"` // 1-based, ascending per parent
+	Version      int        `json:"version" gorm:"not null"` // 1-based, ascending per parent
 	FileName     string     `json:"file_name"`               // original client filename, display only
 	StoredKey    string     `json:"-" gorm:"not null"`       // opaque storage key, never exposed
 	ContentType  string     `json:"content_type"`
-	Size         int64      `json:"size"` // bytes
+	Size         int64      `json:"size"`                   // bytes
 	FileHash     string     `json:"file_hash" gorm:"index"` // SHA256, lowercase hex
 	Note         string     `json:"note" gorm:"type:text"`  // why this revision replaced the last
 	UploadedByID *uuid.UUID `json:"uploaded_by_id" gorm:"type:uuid;index"`
@@ -482,10 +482,10 @@ type ContractSignature struct {
 	SignerRole  Role       `json:"signer_role"`
 	// Placement is stored as page fractions rather than points so the record
 	// stays meaningful independently of the page size it was applied to.
-	Page      int     `json:"page"`
-	PositionX float64 `json:"position_x"`
-	PositionY float64 `json:"position_y"`
-	WidthFrac float64 `json:"width_frac"`
+	Page      int       `json:"page"`
+	PositionX float64   `json:"position_x"`
+	PositionY float64   `json:"position_y"`
+	WidthFrac float64   `json:"width_frac"`
 	SignedAt  time.Time `json:"signed_at"`
 	// Captured at the moment of signing; part of the evidence, not diagnostics.
 	IP        string `json:"ip"`
@@ -542,11 +542,11 @@ type AuditLog struct {
 
 type ChatMessage struct {
 	BaseModel
-	UserID   *uuid.UUID `json:"user_id" gorm:"type:uuid;index"`
-	SessionID string    `json:"session_id" gorm:"index;not null"`
-	Question string     `json:"question" gorm:"type:text;not null"`
-	Answer   string     `json:"answer" gorm:"type:text;not null"`
-	Source   string     `json:"source"`
+	UserID    *uuid.UUID `json:"user_id" gorm:"type:uuid;index"`
+	SessionID string     `json:"session_id" gorm:"index;not null"`
+	Question  string     `json:"question" gorm:"type:text;not null"`
+	Answer    string     `json:"answer" gorm:"type:text;not null"`
+	Source    string     `json:"source"`
 }
 
 // GalleryItem is a photo of Arcus's work shown on the public site. Images are
@@ -572,7 +572,7 @@ type Product struct {
 	// StockMovement ledger, not a column anyone can overwrite — see
 	// stock_models.go. Handlers render it into the `stock` JSON key so the wire
 	// format is unchanged.
-	ImageURL    string  `json:"image_url"`
-	Specs       string  `json:"specs" gorm:"type:text"` // e.g. "Range: 60km | Battery: 48V"
-	IsPublished bool    `json:"is_published" gorm:"default:true"`
+	ImageURL    string `json:"image_url"`
+	Specs       string `json:"specs" gorm:"type:text"` // e.g. "Range: 60km | Battery: 48V"
+	IsPublished bool   `json:"is_published" gorm:"default:true"`
 }

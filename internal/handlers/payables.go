@@ -213,10 +213,10 @@ func (h Handler) AdminUpdateExpense(c echo.Context) error {
 	}
 
 	updates := map[string]any{
-		"supplier":          strings.TrimSpace(req.Supplier),
-		"supplier_tpin":     strings.TrimSpace(req.SupplierTPIN),
-		"category":          req.Category,
-		"reference":         strings.TrimSpace(req.Reference),
+		"supplier":               strings.TrimSpace(req.Supplier),
+		"supplier_tpin":          strings.TrimSpace(req.SupplierTPIN),
+		"category":               req.Category,
+		"reference":              strings.TrimSpace(req.Reference),
 		"smart_invoice_ref":      strings.TrimSpace(req.SmartInvoiceRef),
 		"customs_assessment_ref": strings.TrimSpace(req.CustomsAssessmentRef),
 		"purchase_order_id":      req.PurchaseOrderID,

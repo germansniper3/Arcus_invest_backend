@@ -75,11 +75,11 @@ func purchaseOrderJSON(p models.PurchaseOrder, received map[uuid.UUID]int) map[s
 		}
 		lines = append(lines, map[string]any{
 			"id": l.ID, "product_id": l.ProductID,
-			"description": l.Description,
-			"quantity":    l.Quantity,
-			"unit_price":  l.UnitPrice,
-			"line_total":  l.LineTotal(),
-			"position":    l.Position,
+			"description":          l.Description,
+			"quantity":             l.Quantity,
+			"unit_price":           l.UnitPrice,
+			"line_total":           l.LineTotal(),
+			"position":             l.Position,
 			"received_quantity":    got,
 			"outstanding_quantity": outstanding,
 		})
@@ -104,9 +104,9 @@ func purchaseOrderJSON(p models.PurchaseOrder, received map[uuid.UUID]int) map[s
 		"subtotal_zmw":      p.SubtotalZMW(),
 		// Says out loud where the order stands on delivery, so no screen has to
 		// re-derive it from the line quantities and get it subtly wrong.
-		"fully_received":   fullyReceived,
-		"partly_received":  anyReceived && !fullyReceived,
-		"lines":            lines,
+		"fully_received":  fullyReceived,
+		"partly_received": anyReceived && !fullyReceived,
+		"lines":           lines,
 	}
 }
 

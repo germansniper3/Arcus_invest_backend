@@ -74,10 +74,10 @@ const (
 
 // Entity types an approval request can point at.
 const (
-	ApprovalEntityOpportunity = "opportunities"
-	ApprovalEntityContract    = "contracts"
-	ApprovalEntityPayment     = "payments"
-	ApprovalEntityExpense     = "expenses"
+	ApprovalEntityOpportunity   = "opportunities"
+	ApprovalEntityContract      = "contracts"
+	ApprovalEntityPayment       = "payments"
+	ApprovalEntityExpense       = "expenses"
 	ApprovalEntityPurchaseOrder = "purchase_orders"
 )
 

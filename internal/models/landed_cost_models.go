@@ -109,7 +109,7 @@ type GoodsReceipt struct {
 // the sum of the events, so it cannot drift from them.
 type GoodsReceiptLine struct {
 	BaseModel
-	GoodsReceiptID    uuid.UUID `json:"goods_receipt_id" gorm:"type:uuid;index;not null"`
+	GoodsReceiptID      uuid.UUID `json:"goods_receipt_id" gorm:"type:uuid;index;not null"`
 	PurchaseOrderLineID uuid.UUID `json:"purchase_order_line_id" gorm:"type:uuid;index;not null"`
 
 	Quantity int `json:"quantity" gorm:"not null"`

@@ -11,26 +11,26 @@ import (
 )
 
 type Config struct {
-	Port          string
-	Env           string
-	DatabaseURL   string
-	JWTSecret     string
-	CORSOrigins   []string
-	FrontendURL   string
-	SeedAdminName string
-	SeedAdminEmail string
+	Port              string
+	Env               string
+	DatabaseURL       string
+	JWTSecret         string
+	CORSOrigins       []string
+	FrontendURL       string
+	SeedAdminName     string
+	SeedAdminEmail    string
 	SeedAdminPassword string
-	AIProviderURL string
-	AIAPIKey      string
-	AIModel       string
-	SMTPHost      string
-	SMTPPort      string
-	SMTPUsername  string
-	SMTPPassword  string
+	AIProviderURL     string
+	AIAPIKey          string
+	AIModel           string
+	SMTPHost          string
+	SMTPPort          string
+	SMTPUsername      string
+	SMTPPassword      string
 	// MailFrom is the sender address for every outbound message, whichever
 	// transport carries it. It is not SMTP-specific.
-	MailFrom     string
-	ResendAPIKey string
+	MailFrom      string
+	ResendAPIKey  string
 	StorageDriver string
 	StorageDir    string
 	S3Bucket      string

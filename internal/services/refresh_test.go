@@ -37,7 +37,7 @@ func refreshTestDB(t *testing.T) *gorm.DB {
 func refreshUser(t *testing.T, db *gorm.DB) models.User {
 	t.Helper()
 	u := models.User{
-		Email: "refresh-test-" + uuid.NewString() + "@example.invalid",
+		Email:    "refresh-test-" + uuid.NewString() + "@example.invalid",
 		FullName: "Refresh Fixture", Role: models.RoleAdmin, IsActive: true,
 		TokenVersion: 1,
 	}

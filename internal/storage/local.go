@@ -31,7 +31,7 @@ func NewLocal(baseDir string) (*Local, error) {
 // guards against path-traversal keys ("../"). Callers generate keys themselves,
 // but this is defense in depth.
 func (l *Local) resolve(key string) (string, error) {
-	clean := filepath.Clean("/" + filepath.ToSlash(key))       // force key to be rooted, strip ".."
+	clean := filepath.Clean("/" + filepath.ToSlash(key))        // force key to be rooted, strip ".."
 	full := filepath.Join(l.baseDir, filepath.FromSlash(clean)) // clean starts with "/" so this stays under baseDir
 	base, err := filepath.Abs(l.baseDir)
 	if err != nil {

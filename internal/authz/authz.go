@@ -408,20 +408,20 @@ var pathResources = map[string]Resource{
 	"payables":            ResExpenses,
 	"position":            ResExpenses,
 	// Walk-in selling and the shifts that contain it.
-	"counter-sales":  ResCounterSales,
-	"till-sessions":  ResCounterSales,
+	"counter-sales": ResCounterSales,
+	"till-sessions": ResCounterSales,
 	// The buy side. Goods receipts and their landed cost hang off an order, so
 	// they share its resource: someone who can receive a delivery necessarily
 	// sees what was ordered.
 	"purchase-orders": ResPurchaseOrders,
 	"goods-receipts":  ResPurchaseOrders,
-	"audit-logs":    ResAudit,
-	"email":         ResEmail,
-	"metrics":       ResMetrics,
-	"roles":         ResRoles,
-	"gallery":       ResGallery,
-	"notifications": ResNotifications,
-	"approvals":     ResApprovals,
+	"audit-logs":      ResAudit,
+	"email":           ResEmail,
+	"metrics":         ResMetrics,
+	"roles":           ResRoles,
+	"gallery":         ResGallery,
+	"notifications":   ResNotifications,
+	"approvals":       ResApprovals,
 	// The thresholds are part of the same control surface as the queue they
 	// gate — see the ResApprovals comment for why they must not be separable.
 	"approval-rules": ResApprovals,
