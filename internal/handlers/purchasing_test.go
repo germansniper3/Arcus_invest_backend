@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"arcusinvest/internal/models"
 	"arcusinvest/internal/services"
@@ -489,5 +490,112 @@ func TestAnIssuedOrderCannotBeEdited(t *testing.T) {
 	}
 	if rec.Code != http.StatusConflict {
 		t.Errorf("editing an issued order: got %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Prevents: margin being struck against the supplier's price instead of what
+// the goods actually landed for. This is the whole reason the buy side exists:
+// for a business that imports and resells, a margin computed on the invoice
+// price alone is wrong on every deal.
+func TestLandedCostFlowsIntoMarginForAWonDeal(t *testing.T) {
+	db := testDB(t)
+	h := Handler{DB: db}
+	e := echo.New()
+	actor := fixtureUser(t, db, models.RoleAdmin)
+	clearRules(t, db, models.ApprovalPurchaseOrderIssue)
+	product := fixtureProduct(t, db, 0)
+	deal := fixtureDeal(t, db, 200000, models.StageWon)
+
+	// Buy 2 units at K50,000 with K20,000 of freight => K60,000 landed each.
+	po := createPO(t, h, e, actor, fmt.Sprintf(`{
+		"supplier":"Guangzhou Power Co","currency":"ZMW","exchange_rate":1,
+		"lines":[{"product_id":"%s","description":"20kVA generator","quantity":2,"unit_price":50000}]
+	}`, product.ID))
+	poID := uuid.MustParse(po["id"].(string))
+	lineIDs := poLineIDs(t, po)
+	if rec := issuePO(t, h, e, actor, poID); rec.Code != http.StatusOK {
+		t.Fatalf("issue: got %d: %s", rec.Code, rec.Body.String())
+	}
+	body := fmt.Sprintf(`{
+		"lines":[{"purchase_order_line_id":"%s","quantity":2}],
+		"components":[{"kind":"freight","amount":20000,"currency":"ZMW","exchange_rate":1}]
+	}`, lineIDs[0])
+	if rec := receiveGoods(t, h, e, actor, poID, body); rec.Code != http.StatusCreated {
+		t.Fatalf("receipt: got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Issue both units against the deal.
+	issue := models.StockMovement{
+		ProductID: product.ID, Kind: models.StockSale, Quantity: -2,
+		OpportunityID: &deal.ID,
+	}
+	if err := services.RecordMovement(db, &issue); err != nil {
+		t.Fatalf("issue stock to the deal: %v", err)
+	}
+
+	// And book a direct expense against it, using the field that until now
+	// nothing ever set.
+	exp := models.Expense{
+		Supplier: "Site Crew Ltd", Category: models.ExpTransport,
+		NetAmount: 5000, VatAmount: 0, VatTreatment: models.VatNone,
+		IncurredAt: time.Now().UTC(), OpportunityID: &deal.ID,
+	}
+	if err := db.Create(&exp).Error; err != nil {
+		t.Fatalf("create attributed expense: %v", err)
+	}
+
+	costing, err := services.CostDeal(db, deal)
+	if err != nil {
+		t.Fatalf("CostDeal: %v", err)
+	}
+
+	// 2 x K60,000 landed = K120,000, not the K100,000 the supplier invoiced.
+	if costing.CostOfGoods != 120000 {
+		t.Errorf("cost of goods = %v, want 120000 (supplier price alone would be 100000)", costing.CostOfGoods)
+	}
+	if costing.DirectExpenses != 5000 {
+		t.Errorf("direct expenses = %v, want 5000", costing.DirectExpenses)
+	}
+	if costing.TotalCost != 125000 {
+		t.Errorf("total cost = %v, want 125000", costing.TotalCost)
+	}
+	if costing.Margin != 75000 { // 200000 - 125000
+		t.Errorf("margin = %v, want 75000", costing.Margin)
+	}
+	if costing.GoodsAtCostUnknown != 0 {
+		t.Errorf("uncosted units = %d, want 0", costing.GoodsAtCostUnknown)
+	}
+	// Had freight been ignored, margin would have read K95,000 — a K20,000
+	// overstatement on a single deal.
+	if costing.Margin == 95000 {
+		t.Error("margin was struck against the supplier price, not the landed cost")
+	}
+}
+
+// Prevents: irrecoverable input VAT quietly vanishing from a job's cost. VAT
+// the business paid and cannot reclaim is a real cost of the deal.
+func TestIrrecoverableVatCountsAgainstTheDeal(t *testing.T) {
+	db := testDB(t)
+	deal := fixtureDeal(t, db, 100000, models.StageWon)
+
+	// Standard-rated with no evidence at all: the VAT is sunk.
+	sunk := models.Expense{
+		Supplier: "Parts Depot", Category: models.ExpPurchases,
+		NetAmount: 10000, VatAmount: 1600, VatTreatment: models.VatStandard,
+		IncurredAt: time.Now().UTC(), OpportunityID: &deal.ID,
+	}
+	if err := db.Create(&sunk).Error; err != nil {
+		t.Fatalf("create expense: %v", err)
+	}
+
+	costing, err := services.CostDeal(db, deal)
+	if err != nil {
+		t.Fatalf("CostDeal: %v", err)
+	}
+	if costing.IrrecoverableVat != 1600 {
+		t.Errorf("irrecoverable VAT = %v, want 1600", costing.IrrecoverableVat)
+	}
+	if costing.TotalCost != 11600 {
+		t.Errorf("total cost = %v, want 11600 — sunk VAT is a cost of the job", costing.TotalCost)
 	}
 }

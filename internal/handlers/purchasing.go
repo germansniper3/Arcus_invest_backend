@@ -978,3 +978,30 @@ func (h Handler) recostReceipt(tx *gorm.DB, receiptID uuid.UUID, actor models.Us
 	return tx.Model(&models.GoodsReceipt{}).Where("id = ?", receipt.ID).
 		Update("apportioned_at", time.Now().UTC()).Error
 }
+
+// --- Job costing -----------------------------------------------------------
+
+// AdminDealCosting reports margin on one deal: its value, less the goods it
+// consumed at landed cost, less what was booked directly against it.
+//
+// It lives next to the deal rather than on a reporting screen of its own. A
+// margin somebody has to go and look for does not change behaviour; one sitting
+// beside the deal value does.
+func (h Handler) AdminDealCosting(c echo.Context) error {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, errResponse("invalid opportunity id"))
+	}
+	var opp models.Opportunity
+	if err := h.DB.First(&opp, "id = ?", id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return c.JSON(http.StatusNotFound, errResponse("deal not found"))
+		}
+		return c.JSON(http.StatusInternalServerError, errResponse("could not load the deal"))
+	}
+	costing, err := services.CostDeal(h.DB, opp)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, errResponse("could not cost the deal"))
+	}
+	return c.JSON(http.StatusOK, costing)
+}

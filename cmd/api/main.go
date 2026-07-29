@@ -356,6 +356,9 @@ func buildRouter(h handlers.Handler, cfg *config.Config, db *gorm.DB) *echo.Echo
 	admin.DELETE("/opportunities/:id", h.AdminDeleteOpportunity)
 	admin.GET("/opportunities/:id/activities", h.AdminListActivities)
 	admin.POST("/opportunities/:id/activities", h.AdminCreateActivity)
+	// Margin on a deal: its value less the goods it consumed at landed cost and
+	// the expenses booked against it.
+	admin.GET("/opportunities/:id/costing", h.AdminDealCosting)
 	admin.GET("/opportunities/:id/payments", h.AdminListPayments)
 	admin.POST("/opportunities/:id/payments", h.AdminCreatePayment)
 	admin.DELETE("/payments/:id", h.AdminDeletePayment)
